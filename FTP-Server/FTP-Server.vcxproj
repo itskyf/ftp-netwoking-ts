@@ -130,7 +130,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_WIN32_WINNT=0x0501;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalIncludeDirectories>$(SolutionDir)networking-ts-impl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -146,11 +146,13 @@
     <ClInclude Include="FTPMsgs.hpp" />
     <ClInclude Include="FTPServer.hpp" />
     <ClInclude Include="FTPSession.hpp" />
+    <ClInclude Include="FTPUser.hpp" />
     <ClInclude Include="UserDatabase.hpp" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="FTPServer.cpp" />
     <ClCompile Include="FTPSession.cpp" />
+    <ClCompile Include="FTPUser.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="UserDatabase.cpp" />
   </ItemGroup>

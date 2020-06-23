@@ -16,7 +16,7 @@ namespace net = std::experimental::net;
 class FTPSession : public std::enable_shared_from_this<FTPSession> {
  public:
   FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
-             UserDatabase const& userDb);
+             UserDatabase& userDb);
   virtual ~FTPSession();
   void start();
 
@@ -35,6 +35,7 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
     std::vector<char> streamBuf_;
   };
 
+  FTPMsgs handleFTPCmdUADD(std::string const& para);
   FTPMsgs handleFTPCmdUSER(std::string const& para);
   FTPMsgs handleFTPCmdPASS(std::string const& para);
   FTPMsgs handleFTPCmdACCT(std::string const& para);
@@ -90,8 +91,7 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
 
   fs::path FTP2LocalPath(fs::path const& ftpPath) const;
   FTPMsgs checkPathRenamable(fs::path const& ftpPath) const;
-  void sendDirListing(
-      std::map<fs::path, fs::file_status> const& dirContent);
+  void sendDirListing(std::map<fs::path, fs::file_status> const& dirContent);
   void sendNameList(std::map<fs::path, fs::file_status> const& dirContent);
 
   void sendFTPMsg(FTPMsgs const& msg);
@@ -99,17 +99,17 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
   void readFTPCmd();
   void handleFTPCmd(std::string const& cmd);
 
-  UserDatabase const& userDb_;
-  std::shared_ptr<std::string> loggedUser_;
+  UserDatabase& userDb_;
+  std::shared_ptr<FTPUser> loggedUser_;
   std::string lastCmd_;
   std::string username_;
   std::string renameSrcPath_;
 
   net::io_context& context_;
   net::ip::tcp::socket cmdSocket_;
-  net::strand<net::io_context::executor_type> cmdWriteStrand_;
+  net::strand<net::io_context::executor_type> msgWriteStrand_;
   std::string cmdInputStr_;
-  std::deque<std::string> cmdOutputQueue_;
+  std::deque<std::string> msgOutputQueue_;
 
   bool dataTypeBinary_;
   net::ip::tcp::acceptor dataAcceptor_;
@@ -118,5 +118,4 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
   net::strand<net::io_context::executor_type> dataBufStrand_;
 
   fs::path ftpWorkingDir_;
-  static fs::path const root_;
 };

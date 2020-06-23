@@ -1,5 +1,6 @@
 #include <chrono>
 #include <iostream>
+#include <sstream>
 
 #include "FTPSession.hpp"
 
@@ -40,35 +41,26 @@ static std::string timeString(fs::path const& path) {
   localtime_s(&now_timeinfo, &now_time_t);
   localtime_s(&file_timeinfo, &file_time_t);
 
-  static std::string month_names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
   int current_year = now_timeinfo.tm_year, file_year = file_timeinfo.tm_year;
   // Use strftime for the day and year / time
-  char date[80];
-  if (file_year == current_year) {
-    // We are allowed to return the time!
-    strftime(date, sizeof(date), " %e %R", &file_timeinfo);
-  } else {
-    // We must not return the time, only the date :(
-    strftime(date, sizeof(date), " %e  %Y", &file_timeinfo);
-  }
-  //TODO 1.5 refactor this 
-  return month_names[file_timeinfo.tm_mon] + std::string(date);
+
+  std::stringstream ss;
+  ss << (file_year == current_year ? std::put_time(&file_timeinfo, "%b %e %R")
+                                   : std::put_time(&now_timeinfo, "%b %e  %Y"));
+  // TODO 1 check time
+  return ss.str();
 }
 
-fs::path const FTPSession::root_(fs::current_path());
-
 FTPSession::FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
-                       UserDatabase const& userDb)
+                       UserDatabase& userDb)
     : userDb_(userDb),
       context_(context),
       cmdSocket_(std::move(socket)),
-      cmdWriteStrand_(context_.get_executor()),
+      msgWriteStrand_(context_.get_executor()),
       dataTypeBinary_(false),
       fileRWStrand_(context_.get_executor()),
       dataBufStrand_(context_.get_executor()),
-      dataAcceptor_(context_),
-      ftpWorkingDir_(root_) /*TODO2 choose*/ {
+      dataAcceptor_(context_) {
   // TODO2 nothing here?
 }
 
@@ -90,9 +82,9 @@ void FTPSession::start() {
 }
 
 void FTPSession::sendFTPMsg(FTPMsgs const& msg) {
-  net::post(cmdWriteStrand_, [me = shared_from_this(), msg]() {
-    bool writeInProgress = !me->cmdOutputQueue_.empty();
-    me->cmdOutputQueue_.push_back(msg.str());
+  net::post(msgWriteStrand_, [me = shared_from_this(), msg]() {
+    bool writeInProgress = !me->msgOutputQueue_.empty();
+    me->msgOutputQueue_.push_back(msg.str());
     if (!writeInProgress) {
       me->startSendingMsgs();
     }
@@ -100,16 +92,16 @@ void FTPSession::sendFTPMsg(FTPMsgs const& msg) {
 }
 
 void FTPSession::startSendingMsgs() {
-  std::cout << "FTP >> " << cmdOutputQueue_.front() << std::endl;
+  std::cout << "FTP >> " << msgOutputQueue_.front() << std::endl;
   net::async_write(
-      cmdSocket_, net::buffer(cmdOutputQueue_.front()),
+      cmdSocket_, net::buffer(msgOutputQueue_.front()),
       net::bind_executor(
-          cmdWriteStrand_,
+          msgWriteStrand_,
           [me = shared_from_this()](std::error_code const& ec,
                                     std::size_t /*bytes_to_transfer*/) {
             if (!ec) {
-              me->cmdOutputQueue_.pop_front();
-              if (!me->cmdOutputQueue_.empty()) {
+              me->msgOutputQueue_.pop_front();
+              if (!me->msgOutputQueue_.empty()) {
                 me->startSendingMsgs();
               }
             } else {
@@ -141,8 +133,11 @@ void FTPSession::readFTPCmd() {
 
 void FTPSession::handleFTPCmd(std::string const& cmd) {
   const std::map<std::string, std::function<FTPMsgs(std::string)>> cmdMap{
-      // TODO1 check lambda this or shared
-      // Access control commands
+      // TODO1 make it static?
+      {"UADD",
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdUADD(para);
+       }},
       {"USER",
        [&](std::string const& para) -> FTPMsgs {
          return handleFTPCmdUSER(para);
@@ -274,6 +269,7 @@ void FTPSession::handleFTPCmd(std::string const& cmd) {
          return handleFTPCmdNOOP(para);
        }},
   };
+
   size_t spaceIdx = cmd.find_first_of(' ');
   std::string ftpCmd = cmd.substr(0, spaceIdx);
   std::transform(ftpCmd.begin(), ftpCmd.end(), ftpCmd.begin(), ::toupper);
@@ -291,7 +287,7 @@ void FTPSession::handleFTPCmd(std::string const& cmd) {
   }
   if (lastCmd_ == "QUIT") {
     // Close command socket
-    net::bind_executor(cmdWriteStrand_,
+    net::bind_executor(msgWriteStrand_,
                        [me = shared_from_this()]() { me->cmdSocket_.close(); });
   } else {
     // Wait for next command
@@ -300,12 +296,15 @@ void FTPSession::handleFTPCmd(std::string const& cmd) {
 }
 
 fs::path FTPSession::FTP2LocalPath(fs::path const& ftpPath) const {
-  fs::path path = ftpPath.is_absolute() ? root_ / ftpPath.relative_path()
-                                        : ftpWorkingDir_ / ftpPath;
+  assert(loggedUser_);
+  fs::path path = ftpPath.is_absolute()
+                      ? loggedUser_->localRootPath_ / ftpPath.relative_path()
+                      : ftpWorkingDir_ / ftpPath;
   return fs::weakly_canonical(path);
 }
 
 FTPMsgs FTPSession::checkPathRenamable(fs::path const& ftpPath) const {
+  // TODO1 check it
   if (!loggedUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
@@ -352,14 +351,14 @@ void FTPSession::sendDirListing(
 
         // Copy the file list into a raw char vector
         std::string dirListStr = stream.str();
-        std::shared_ptr<std::vector<char>> dir_listing_rawdata =
+        std::shared_ptr<std::vector<char>> rawDirListData =
             std::make_shared<std::vector<char>>();
-        dir_listing_rawdata->reserve(dirListStr.size());
+        rawDirListData->reserve(dirListStr.size());
         std::copy(dirListStr.begin(), dirListStr.end(),
-                  std::back_inserter(*dir_listing_rawdata));
+                  std::back_inserter(*rawDirListData));
 
         // Send the string out
-        me->addDataToBufferAndSend(peer, dir_listing_rawdata);
+        me->addDataToBufferAndSend(peer, rawDirListData);
         me->addDataToBufferAndSend(
             peer,
             std::shared_ptr<std::vector<char>>());  // Nullpointer indicates
@@ -403,10 +402,18 @@ void FTPSession::sendNameList(
 
 // FTP Commands
 // Access control commands
+FTPMsgs FTPSession::handleFTPCmdUADD(std::string const& param) {
+  loggedUser_ = nullptr;
+  username_ = param;
+  return param.empty()
+             ? FTPMsgs(FTPReplyCode::SYNTAX_ERROR_PARAMETERS,
+                       "Please provide username")
+             : FTPMsgs(FTPReplyCode::USER_NAME_OK, "Please enter new password");
+}
+
 FTPMsgs FTPSession::handleFTPCmdUSER(std::string const& param) {
   loggedUser_ = nullptr;
   username_ = param;
-  ftpWorkingDir_ = root_;
   return param.empty()
              ? FTPMsgs(FTPReplyCode::SYNTAX_ERROR_PARAMETERS,
                        "Please provide username")
@@ -414,15 +421,25 @@ FTPMsgs FTPSession::handleFTPCmdUSER(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdPASS(std::string const& param) {
-  if (lastCmd_ != "USER") {
+  if (lastCmd_ == "USER") {
+    if (auto user = userDb_.getUser(username_, param); user) {
+      loggedUser_ = user;
+      return FTPMsgs(FTPReplyCode::USER_LOGGED_IN, "Login successfully");
+    } else {
+      return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Failed to log in");
+    }
+  } else if (lastCmd_ == "UADD") {
+    // TODO1 choose root dir
+    if (auto user = userDb_.addUser(username_, param, fs::current_path());
+        user) {
+      loggedUser_ = user;
+      return FTPMsgs(FTPReplyCode::USER_LOGGED_IN, "Sign up successfully");
+    } else {
+      return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Username already existed");
+    }
+  } else {
     return FTPMsgs(FTPReplyCode::COMMANDS_BAD_SEQUENCE,
                    "Please specify username first");
-  }
-  if (auto user = userDb_.getUser(username_, param); user) {
-    loggedUser_ = user;
-    return FTPMsgs(FTPReplyCode::USER_LOGGED_IN, "Login successful");
-  } else {
-    return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Failed to log in");
   }
 }
 
@@ -472,7 +489,7 @@ FTPMsgs FTPSession::handleFTPCmdCDUP(std::string const& /*param*/) {
   if (!loggedUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
-  if (ftpWorkingDir_ != root_) {
+  if (ftpWorkingDir_ != loggedUser_->localRootPath_) {
     // Only CDUP when we are not already at the root directory
     FTPMsgs cwdReply = handleFTPCmdCWD("..");
     // The CWD returns FILE_ACTION_COMPLETED on success, while CDUP returns
@@ -775,6 +792,7 @@ FTPMsgs FTPSession::handleFTPCmdPWD(std::string const& /*param*/) {
   if (!loggedUser_) {
     return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN, "Not logged in");
   }
+  // TODO1 bo root trong cai duoi
   return FTPMsgs(FTPReplyCode::PATHNAME_CREATED, ftpWorkingDir_.string());
 }
 

@@ -10,11 +10,11 @@ namespace net = std::experimental::net;
 
 class FTPServer {
  public:
-  FTPServer();
+  FTPServer(unsigned int nbThreads, uint16_t port);
   virtual ~FTPServer();
-  void start(unsigned int nbThreads, uint16_t port);
   void stop();
 
+  // TODO1 remove when done
   void addUser(std::string const& uname, std::string const& pass);
 
  private:

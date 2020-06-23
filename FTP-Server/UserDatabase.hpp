@@ -4,16 +4,20 @@
 #include <mutex>
 #include <string>
 
+#include "FTPUser.hpp"
+
 class UserDatabase {
  public:
-  std::shared_ptr<std::string> getUser(std::string const& username,
-                                       std::string const& password) const;
-  bool addUser(const std::string& username, const std::string& password);
+  std::shared_ptr<FTPUser> getUser(std::string const& username,
+                                   std::string const& password) const;
+  std::shared_ptr<FTPUser> addUser(std::string const& username,
+                                   std::string const& password,
+                                   fs::path const& localRootPath = "");
 
  private:
-  bool isUsernameAnonymousUser(const std::string& username) const;
+  bool isUsernameAnonymousUser(std::string const& username) const;
 
-  mutable std::mutex database_mutex_;
-  std::map<std::string, std::string> database_;
-  std::shared_ptr<std::string> anonymous_user_;
+  mutable std::mutex mutex_;
+  std::map<std::string, std::shared_ptr<FTPUser>> userDb_;
+  std::shared_ptr<FTPUser> anonymousUser_;
 };

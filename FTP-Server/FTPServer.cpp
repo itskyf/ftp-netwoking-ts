@@ -3,11 +3,8 @@
 #include "FTPServer.hpp"
 #include "FTPSession.hpp"
 
-FTPServer::FTPServer() : acceptor_(ioContext_) {}
-
-FTPServer::~FTPServer() { stop(); }
-
-void FTPServer::start(unsigned int nbThreads, uint16_t port) {
+FTPServer::FTPServer(unsigned int nbThreads, uint16_t port)
+    : acceptor_(ioContext_) {
   net::ip::tcp::endpoint endpoint(net::ip::tcp::v4(), port);
 
   try {
@@ -31,6 +28,8 @@ void FTPServer::start(unsigned int nbThreads, uint16_t port) {
     threadPool_.emplace_back([=] { ioContext_.run(); });
   }
 }
+
+FTPServer::~FTPServer() { stop(); }
 
 void FTPServer::stop() {
   ioContext_.stop();

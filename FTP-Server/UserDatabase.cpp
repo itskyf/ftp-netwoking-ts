@@ -2,49 +2,50 @@
 
 #include "UserDatabase.hpp"
 
-std::shared_ptr<std::string> UserDatabase::getUser(
+std::shared_ptr<FTPUser> UserDatabase::getUser(
     std::string const& username, std::string const& password) const {
-  std::lock_guard<decltype(database_mutex_)> database_lock(database_mutex_);
+  std::lock_guard<decltype(mutex_)> userDb_lock(mutex_);
 
   if (isUsernameAnonymousUser(username)) {
-    return anonymous_user_;
+    return anonymousUser_;
   }
-  auto user_it = database_.find(username);
-  return user_it != database_.end() && user_it->second == password
-             ? std::make_shared<std::string>(user_it->first)
+  auto userIt = userDb_.find(username);
+  return userIt != userDb_.end() && userIt->second->pass_ == password
+             ? userIt->second
              : nullptr;
 }
 
-bool UserDatabase::addUser(const std::string& username,
-                           const std::string& password) {
-  std::lock_guard<decltype(database_mutex_)> database_lock(database_mutex_);
+std::shared_ptr<FTPUser> UserDatabase::addUser(std::string const& username,
+                                               std::string const& password,
+                                               fs::path const& localRootPath) {
+  std::lock_guard<decltype(mutex_)> userDb_lock(mutex_);
 
   if (isUsernameAnonymousUser(username)) {
-    if (anonymous_user_) {
+    if (anonymousUser_) {
       std::cerr << "The username denotes the anonymous user, which is "
                    "already present."
                 << std::endl;
-      return false;
+      return nullptr;
     } else {
-      anonymous_user_ = std::make_shared<std::string>(username);
+      anonymousUser_ = std::make_shared<FTPUser>(password, localRootPath);
       std::cout << "Successfully added anonymous user." << std::endl;
-      return true;
+      return anonymousUser_;
     }
   } else {
-    auto user_it = database_.find(username);
-    if (user_it == database_.end()) {
-      database_.emplace(username, password);
+    if (auto userIt = userDb_.find(username); userIt == userDb_.end()) {
+      auto newAcc = std::make_shared<FTPUser>(password, localRootPath);
+      userDb_.emplace(username, newAcc);
       std::cout << "Successfully added user \"" << username << "\"."
                 << std::endl;
-      return true;
+      return newAcc;
     } else {
       std::cerr << "Username \"" << username << "\" already exists."
                 << std::endl;
-      return false;
+      return nullptr;
     }
   }
 }
 
-bool UserDatabase::isUsernameAnonymousUser(const std::string& username) const {
-  return (username.empty() || username == "ftp" || username == "anonymous");
+bool UserDatabase::isUsernameAnonymousUser(std::string const& username) const {
+  return username.empty() || username == "ftp" || username == "anonymous";
 }
