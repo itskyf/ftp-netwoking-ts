@@ -1,3 +1,4 @@
+#include <chrono>
 #include <iostream>
 
 #include "FTPSession.hpp"
@@ -24,9 +25,40 @@ static std::string permString(fs::perms const& p) {
   return perm;
 }
 
+static std::string timeString(fs::path const& path) {
+  using namespace std::chrono;
+
+  fs::file_time_type ftime = fs::last_write_time(path);
+  auto sctp = time_point_cast<system_clock::duration>(
+      ftime - decltype(ftime)::clock::now() + system_clock::now());
+  std::time_t file_time_t = system_clock::to_time_t(sctp);
+
+  auto now = system_clock::now();
+  std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+
+  std::tm now_timeinfo, file_timeinfo;
+  localtime_s(&now_timeinfo, &now_time_t);
+  localtime_s(&file_timeinfo, &file_time_t);
+
+  static std::string month_names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  int current_year = now_timeinfo.tm_year, file_year = file_timeinfo.tm_year;
+  // Use strftime for the day and year / time
+  char date[80];
+  if (file_year == current_year) {
+    // We are allowed to return the time!
+    strftime(date, sizeof(date), " %e %R", &file_timeinfo);
+  } else {
+    // We must not return the time, only the date :(
+    strftime(date, sizeof(date), " %e  %Y", &file_timeinfo);
+  }
+  //TODO 1.5 refactor this 
+  return month_names[file_timeinfo.tm_mon] + std::string(date);
+}
+
 fs::path const FTPSession::root_(fs::current_path());
 
-FTPSession::FTPSession(net::io_context& context, net::ip::tcp::socket&& socket,
+FTPSession::FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
                        UserDatabase const& userDb)
     : userDb_(userDb),
       context_(context),
@@ -36,13 +68,13 @@ FTPSession::FTPSession(net::io_context& context, net::ip::tcp::socket&& socket,
       fileRWStrand_(context_.get_executor()),
       dataBufStrand_(context_.get_executor()),
       dataAcceptor_(context_),
-      ftpWorkingDir_(root_) /*TODO choose*/ {
-  // TODO nothing here?
+      ftpWorkingDir_(root_) /*TODO2 choose*/ {
+  // TODO2 nothing here?
 }
 
 FTPSession::~FTPSession() {
   std::cout << "FTP Session shutting down" << std::endl;
-  // TODO completion_handler?
+  // TODO2 completion_handler?
 }
 
 void FTPSession::start() {
@@ -58,15 +90,13 @@ void FTPSession::start() {
 }
 
 void FTPSession::sendFTPMsg(FTPMsgs const& msg) {
-  // TODO checkit bind_executor
-  net::post(cmdWriteStrand_,
-            [me = shared_from_this(), &msg = std::as_const(msg)]() {
-              bool write_in_progress = !me->cmdOutputQueue_.empty();
-              me->cmdOutputQueue_.push_back(msg.str());
-              if (!write_in_progress) {
-                me->startSendingMsgs();
-              }
-            });
+  net::post(cmdWriteStrand_, [me = shared_from_this(), msg]() {
+    bool writeInProgress = !me->cmdOutputQueue_.empty();
+    me->cmdOutputQueue_.push_back(msg.str());
+    if (!writeInProgress) {
+      me->startSendingMsgs();
+    }
+  });
 }
 
 void FTPSession::startSendingMsgs() {
@@ -92,155 +122,156 @@ void FTPSession::readFTPCmd() {
   net::async_read_until(
       cmdSocket_, net::dynamic_buffer(cmdInputStr_), "\r\n",
       [me = shared_from_this()](std::error_code const& ec, size_t length) {
-        if (ec) {
-          if (ec != net::error::eof) {
-            std::cerr << "async_read_until() error: " << ec.message()
-                      << std::endl;
-          } else {
-            std::cout << "Control connection closed by client" << std::endl;
-          }
-        } else {
+        if (!ec) {
           std::string packetStr(me->cmdInputStr_, 0,
-                                length - 2);  // Remove \r\n
+                                length - 2);  // Remove \r\nt
+          me->cmdInputStr_.clear();
           std::cout << "FTP << " << packetStr << std::endl;
           me->handleFTPCmd(packetStr);
+          return;
+        }
+        if (ec != net::error::eof) {
+          std::cerr << "async_read_until() error: " << ec.message()
+                    << std::endl;
+        } else {
+          std::cout << "Control connection closed by client" << std::endl;
         }
       });
 }
 
 void FTPSession::handleFTPCmd(std::string const& cmd) {
   const std::map<std::string, std::function<FTPMsgs(std::string)>> cmdMap{
-      // TODO check lambda this or shared
+      // TODO1 check lambda this or shared
       // Access control commands
       {"USER",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdUSER(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdUSER(para);
        }},
       {"PASS",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdPASS(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdPASS(para);
        }},
       {"ACCT",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdACCT(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdACCT(para);
        }},
       {"CWD",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdCWD(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdCWD(para);
        }},
       {"CDUP",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdCDUP(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdCDUP(para);
        }},
       {"REIN",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdREIN(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdREIN(para);
        }},
       {"QUIT",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdQUIT(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdQUIT(para);
        }},
       // Transfer parameter commands
       {"PORT",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdPORT(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdPORT(para);
        }},
       {"PASV",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdPASV(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdPASV(para);
        }},
       {"TYPE",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdTYPE(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdTYPE(para);
        }},
       {"STRU",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdSTRU(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdSTRU(para);
        }},
       {"MODE",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdMODE(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdMODE(para);
        }},
       // Ftp service commands
       {"RETR",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdRETR(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdRETR(para);
        }},
       {"STOR",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdSTOR(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdSTOR(para);
        }},
       {"STOU",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdSTOU(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdSTOU(para);
        }},
       {"APPE",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdAPPE(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdAPPE(para);
        }},
       {"ALLO",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdALLO(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdALLO(para);
        }},
       {"REST",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdREST(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdREST(para);
        }},
       {"RNFR",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdRNFR(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdRNFR(para);
        }},
       {"RNTO",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdRNTO(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdRNTO(para);
        }},
       {"ABOR",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdABOR(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdABOR(para);
        }},
       {"DELE",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdDELE(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdDELE(para);
        }},
       {"RMD",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdRMD(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdRMD(para);
        }},
       {"MKD",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdMKD(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdMKD(para);
        }},
       {"PWD",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdPWD(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdPWD(para);
        }},
       {"LIST",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdLIST(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdLIST(para);
        }},
       {"NLST",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdNLST(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdNLST(para);
        }},
       {"SITE",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdSITE(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdSITE(para);
        }},
       {"SYST",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdSYST(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdSYST(para);
        }},
       {"STAT",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdSTAT(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdSTAT(para);
        }},
       {"HELP",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdHELP(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdHELP(para);
        }},
       {"NOOP",
-       [this](std::string const& para) -> FTPMsgs {
-         this->handleFTPCmdNOOP(para);
+       [&](std::string const& para) -> FTPMsgs {
+         return handleFTPCmdNOOP(para);
        }},
   };
   size_t spaceIdx = cmd.find_first_of(' ');
@@ -290,7 +321,7 @@ FTPMsgs FTPSession::checkPathRenamable(fs::path const& ftpPath) const {
     } else {
       return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN, "File does not exist");
     }
-  } catch (fs::filesystem_error const& er) {
+  } catch (fs::filesystem_error const&) {
     return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN, "Permission denied");
   }
 }
@@ -305,18 +336,17 @@ void FTPSession::sendDirListing(
               FTPMsgs(FTPReplyCode::TRANSFER_ABORTED, "Data transfer aborted"));
           return;
         }
-        // TODO: close acceptor after connect?
+        // TODO3: close acceptor after connect?
         // Create a Unix-like file list
         std::stringstream stream;
         std::string owner = "hcmus", group = "hcmus";
         for (auto const& entry : dirContent) {
           auto const& filePath(entry.first);
           auto const& fileStatus(entry.second);
-          stream << (fs::is_directory(fileStatus) ? 'd' : '-')
-                 << permString(fileStatus.permissions()) << "   1 ";
           stream << std::setw(10) << owner << " " << std::setw(10) << group
-                 << " " << std::setw(10) << fs::file_size(filePath) << " ";
-          // TODO stream << fileStatus.timeString() << " ";
+                 << " ";
+          stream << std::setw(10) << fs::file_size(filePath) << " ";
+          stream << timeString(filePath) << " ";
           stream << filePath.filename() << "\r\n";
         }
 
@@ -410,7 +440,7 @@ FTPMsgs FTPSession::handleFTPCmdCWD(std::string const& param) {
   }
 
   fs::path absNewWorkingDir = FTP2LocalPath(param);
-  // TODO network drive
+  // TODO3 network drive
   try {
     auto status = fs::exists(absNewWorkingDir);
   } catch (fs::filesystem_error const&) {
@@ -509,7 +539,7 @@ FTPMsgs FTPSession::handleFTPCmdTYPE(std::string const& param) {
   }
   if (param == "A") {
     dataTypeBinary_ = false;
-    // TODO: The ASCII mode currently does not work as RFC 959 demands it. It
+    // TODO3: The ASCII mode currently does not work as RFC 959 demands it. It
     // should perform line ending conversion, which it doesn't. But as we are
     // living in the 21st centry, nobody should use ASCII mode anyways.
     return FTPMsgs(FTPReplyCode::COMMAND_OK, "Switching to ASCII mode");
@@ -560,7 +590,7 @@ FTPMsgs FTPSession::handleFTPCmdSTOR(std::string const& param) {
   if (!loggedUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
-  // TODO: the ACTION_NOT_TAKEN reply is not RCF 959 conform. Apparently in
+  // TODO3: the ACTION_NOT_TAKEN reply is not RCF 959 conform. Apparently in
   // 1985 nobody anticipated that you might not want anybody uploading files
   // to your server. We use the return code anyways, as the popular FileZilla
   // Server also returns that code as "Permission denied"
@@ -576,7 +606,7 @@ FTPMsgs FTPSession::handleFTPCmdSTOR(std::string const& param) {
           FTPReplyCode::ACTION_NOT_TAKEN_FILENAME_NOT_ALLOWED,
           "Cannot create file. A directory with that name already exists.");
     }
-  } catch (fs::filesystem_error const& er) {
+  } catch (fs::filesystem_error const&) {
     return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN_FILENAME_NOT_ALLOWED,
                    "Cannot read file status.");
   }
@@ -612,7 +642,7 @@ FTPMsgs FTPSession::handleFTPCmdAPPE(std::string const& param) {
     if (!fs::is_regular_file(localPath)) {
       return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN, "File does not exist.");
     }
-  } catch (fs::filesystem_error const& er) {
+  } catch (fs::filesystem_error const&) {
     return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN, "Cannot read file status.");
   }
 
@@ -664,7 +694,7 @@ FTPMsgs FTPSession::handleFTPCmdRNTO(std::string const& param) {
                    "No target name given");
   }
 
-  // TODO: returning neiher FILE_ACTION_NOT_TAKEN nor ACTION_NOT_TAKEN are
+  // TODO3: returning neiher FILE_ACTION_NOT_TAKEN nor ACTION_NOT_TAKEN are
   // RFC 959 conform. Aoarently back in 1985 it was assumed that the RNTO
   // command will always succeed, as long as you enter a valid target file
   // name. Thus we use the two return codes anyways, the popular FileZilla
@@ -682,7 +712,7 @@ FTPMsgs FTPSession::handleFTPCmdRNTO(std::string const& param) {
     }
 
     std::error_code ec;
-    // TODO catch????
+    // TODO2 catch????
     fs::rename(localSrcPath, localDstPath, ec);
     return ec ? FTPMsgs(FTPReplyCode::FILE_ACTION_NOT_TAKEN,
                         "Error renaming file")
@@ -761,8 +791,8 @@ FTPMsgs FTPSession::handleFTPCmdLIST(std::string const& param) {
         return FTPMsgs(FTPReplyCode::FILE_STATUS_OK_OPENING_DATA_CONNECTION,
                        "Sending directory listing");
       } else {
-        // TODO: RFC959: If the pathname specifies a file then the server should
-        // send current information on the file.
+        // TODO3: RFC959: If the pathname specifies a file then the server
+        // should send current information on the file.
         return FTPMsgs(FTPReplyCode::FILE_ACTION_NOT_TAKEN,
                        "Path is not a directory");
       }
@@ -788,8 +818,8 @@ FTPMsgs FTPSession::handleFTPCmdNLST(std::string const& param) {
         return FTPMsgs(FTPReplyCode::FILE_STATUS_OK_OPENING_DATA_CONNECTION,
                        "Sending name list");
       } else {
-        // TODO: RFC959: If the pathname specifies a file then the server should
-        // send current information on the file.
+        // TODO3: RFC959: If the pathname specifies a file then the server
+        // should send current information on the file.
         return FTPMsgs(FTPReplyCode::FILE_ACTION_NOT_TAKEN,
                        "Path is not a directory");
       }

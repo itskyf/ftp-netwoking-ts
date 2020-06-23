@@ -15,7 +15,7 @@ namespace net = std::experimental::net;
 
 class FTPSession : public std::enable_shared_from_this<FTPSession> {
  public:
-  FTPSession(net::io_context& context, net::ip::tcp::socket&& socket,
+  FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
              UserDatabase const& userDb);
   virtual ~FTPSession();
   void start();

@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.30128.36
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FTP-Server", "FTP-Server\FTP-Server.vcxproj", "{2DE34106-E069-4368-9C42-40653BB4531F}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FTP-Client", "FTP-Client\FTP-Client.vcxproj", "{04C49397-062E-4887-89C4-F6F966C23DCF}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -21,6 +23,14 @@ Global
 		{2DE34106-E069-4368-9C42-40653BB4531F}.Release|x64.Build.0 = Release|x64
 		{2DE34106-E069-4368-9C42-40653BB4531F}.Release|x86.ActiveCfg = Release|Win32
 		{2DE34106-E069-4368-9C42-40653BB4531F}.Release|x86.Build.0 = Release|Win32
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Debug|x64.ActiveCfg = Debug|x64
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Debug|x64.Build.0 = Debug|x64
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Debug|x86.ActiveCfg = Debug|Win32
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Debug|x86.Build.0 = Debug|Win32
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Release|x64.ActiveCfg = Release|x64
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Release|x64.Build.0 = Release|x64
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Release|x86.ActiveCfg = Release|Win32
+		{04C49397-062E-4887-89C4-F6F966C23DCF}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
