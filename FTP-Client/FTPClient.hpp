@@ -1,40 +1,38 @@
-#pragma once
-#include <experimental/net>
+#include <experimental/io_context>
+#include <experimental/internet>
 
-#include <deque>
-#include <memory>
 #include <string>
-#include <thread>
+#include <utility>
+#include <fstream>
 
 namespace net = std::experimental::net;
 
-class FTPClient : public std::enable_shared_from_this<FTPClient> {
+class FTPClient {
+  using FTPMsg = std::pair<int, std::string>;
+  using charbuf_ptr = std::shared_ptr<std::vector<char>>;
+
  public:
-  FTPClient(std::string const& hostIP, uint16_t port);
-  virtual ~FTPClient();
-  void stop();
+  FTPClient();
+  void connect(std::string const& ip, uint16_t port);
+  void close();
+
+  bool signup(std::string const& uname, std::string const& pass);
+  bool login(std::string const& uname, std::string const& pass);
+  bool upload(std::string const& local_file, std::string const& remote_file);
+  bool download(std::string const& remote_file, std::string const& local_file);
+  bool pwd();
+  bool ls(std::string const& remoteDir);
+  bool cd(std::string const& remoteDir);
 
  private:
-  std::string handleFTPMsg220();  // Welcome to fineFTP Server
-  std::string handleFTPMsg331();  // Password
-  std::string handleFTPMsg230();  // Login Successful
-  std::string handleFTPMsg530();  // fail to log in
-  std::string handleFTPMsg426();  // Data transfer aborted
-  std::string handleFTPMsg503();  // Please specify username first
-  std::string handleFTPMsg250();  // "Working directory changed to " +
-  std::string handleFTPMsg227();  // Entering passive mode
-  std::string handleFTPMsg350();  // Enter targetname
-  void handleFTPMsg(std::string const& msg);
-  void sendFTPCmd(std::string const& cmd);
-  void startSendingCmds();
-  void readFTPMsg();
+  FTPMsg readFTPMsg();
+  void sendCmd(std::string const& cmd);
+  std::string dataRecv();
+
+  void closeDataSocket();
+  bool resetDataSocket();
 
   net::io_context ioContext_;
-  net::ip::tcp::socket socket_;
-  net::strand<net::io_context::executor_type> cmdWriteStrand_;
-  std::thread onlyThread_;
-
-  std::deque<std::string> cmdOutputQueue_;
-  std::string remotePath_;
-  int lastMsg_;
+  net::ip::tcp::socket msgSocket_;
+  net::ip::tcp::socket dataSocket_;
 };

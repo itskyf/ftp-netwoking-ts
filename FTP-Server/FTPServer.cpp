@@ -59,3 +59,11 @@ void FTPServer::acceptSession(std::error_code const& error,
         acceptSession(error, peer_);
       });
 }
+
+void FTPServer::show_List_User_Login() {
+  // TODO1 add new khi da log in thanh cong, mutex list nay
+
+  for (auto const& session : list_user_login_) {
+    if (session->getUserName()) std::cout << session << std::setw(10) <<
+  }
+}

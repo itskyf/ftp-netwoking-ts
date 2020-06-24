@@ -3,6 +3,7 @@
 enum class FTPReplyCode : int {
   // Reply codes from RFC 959 (plain FTP)
   // https://tools.ietf.org/html/rfc959
+  // TODO2 separate into file
 
   COMMAND_OK = 200,
   SYNTAX_ERROR_UNRECOGNIZED_COMMAND = 500,
@@ -46,6 +47,8 @@ enum class FTPReplyCode : int {
   ACTION_NOT_TAKEN_INSUFFICIENT_STORAGE_SPACE = 452,
   FILE_ACTION_ABORTED = 552,
   ACTION_NOT_TAKEN_FILENAME_NOT_ALLOWED = 553,
+
+  USER_NOTIFICATION = 711,
 };
 
 class FTPMsgs {

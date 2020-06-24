@@ -38,8 +38,19 @@ static std::string timeString(fs::path const& path) {
   std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
 
   std::tm now_timeinfo, file_timeinfo;
+#if defined(__unix__)
+  localtime_r(&now_time_t, &now_timeinfo);
+  localtime_r(&file_time_t, &file_timeinfo);
+#elif defined(_MSC_VER)
   localtime_s(&now_timeinfo, &now_time_t);
   localtime_s(&file_timeinfo, &file_time_t);
+#else
+  static std::mutex mtx;
+  std::unique_lock<std::mutex> lock(mtx);
+  now_timeinfo = *std::localtime(&now_time_t);
+  file_timeinfo = *std::localtime(&file_time_t);
+  lock.unlock();
+#endif
 
   int current_year = now_timeinfo.tm_year, file_year = file_timeinfo.tm_year;
   // Use strftime for the day and year / time
@@ -51,23 +62,27 @@ static std::string timeString(fs::path const& path) {
   return ss.str();
 }
 
-FTPSession::FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
-                       UserDatabase& userDb)
+FTPSession::FTPSession(
+    net::io_context& context, net::ip::tcp::socket& socket,
+    UserDatabase& userDb, std::set<session_ptr>& logged_users,
+    std::function<void(std::string)> const& completionHandler)
     : userDb_(userDb),
+      logged_users_(logged_users),
       context_(context),
       cmdSocket_(std::move(socket)),
+      dataTypeBinary_(true),
       msgWriteStrand_(context_.get_executor()),
-      dataTypeBinary_(false),
       fileRWStrand_(context_.get_executor()),
       dataBufStrand_(context_.get_executor()),
-      dataAcceptor_(context_) {
-  // TODO2 nothing here?
-}
+      dataAcceptor_(context_),
+      completionHandler_(completionHandler) {}
 
 FTPSession::~FTPSession() {
   std::cout << "FTP Session shutting down" << std::endl;
   // TODO2 completion_handler?
 }
+
+std::string FTPSession::getUserName() const { return username_; }
 
 void FTPSession::start() {
   try {
@@ -105,7 +120,7 @@ void FTPSession::startSendingMsgs() {
                 me->startSendingMsgs();
               }
             } else {
-              std::cerr << "Command write error: " << ec.message() << std::endl;
+              std::cerr << "Message write error: " << ec.message() << std::endl;
             }
           }));
 }
@@ -116,7 +131,7 @@ void FTPSession::readFTPCmd() {
       [me = shared_from_this()](std::error_code const& ec, size_t length) {
         if (!ec) {
           std::string packetStr(me->cmdInputStr_, 0,
-                                length - 2);  // Remove \r\nt
+                                length - 2);  // Remove \r\n
           me->cmdInputStr_.clear();
           std::cout << "FTP << " << packetStr << std::endl;
           me->handleFTPCmd(packetStr);
@@ -297,10 +312,23 @@ void FTPSession::handleFTPCmd(std::string const& cmd) {
 
 fs::path FTPSession::FTP2LocalPath(fs::path const& ftpPath) const {
   assert(loggedUser_);
+  // TODO1 if path is /.., limit ..
   fs::path path = ftpPath.is_absolute()
                       ? loggedUser_->localRootPath_ / ftpPath.relative_path()
                       : ftpWorkingDir_ / ftpPath;
-  return fs::weakly_canonical(path);
+  path = fs::weakly_canonical(path);
+  return path < loggedUser_->localRootPath_ ? loggedUser_->localRootPath_
+                                            : path;
+}
+
+std::string FTPSession::Local_to_FTP_Path(fs::path const& ftp_Path) const {
+  // ftp_Path:     C:\\mn              | /home/mn
+  // logged->root: C:\\mn\\abc\\xyz    | /home/mn/abc/xyz
+  // return         /abc/xyz
+  assert(loggedUser_);  // Entering passive mode (192,168,122,24,195,110)
+  std::string ftp_path = ftp_Path.generic_string();
+  std::string root_path = loggedUser_->localRootPath_.generic_string();
+  return root_path.substr(root_path.find(ftp_path) + ftp_path.length());
 }
 
 FTPMsgs FTPSession::checkPathRenamable(fs::path const& ftpPath) const {
@@ -327,50 +355,46 @@ FTPMsgs FTPSession::checkPathRenamable(fs::path const& ftpPath) const {
 
 void FTPSession::sendDirListing(
     std::map<fs::path, fs::file_status> const& dirContent) {
-  dataAcceptor_.async_accept(
-      [&dirContent = std::as_const(dirContent), me = shared_from_this()](
-          std::error_code const& ec, net::ip::tcp::socket peer) {
-        if (ec) {
-          me->sendFTPMsg(
-              FTPMsgs(FTPReplyCode::TRANSFER_ABORTED, "Data transfer aborted"));
-          return;
-        }
-        // TODO3: close acceptor after connect?
-        // Create a Unix-like file list
-        std::stringstream stream;
-        std::string owner = "hcmus", group = "hcmus";
-        for (auto const& entry : dirContent) {
-          auto const& filePath(entry.first);
-          auto const& fileStatus(entry.second);
-          stream << std::setw(10) << owner << " " << std::setw(10) << group
-                 << " ";
-          stream << std::setw(10) << fs::file_size(filePath) << " ";
-          stream << timeString(filePath) << " ";
-          stream << filePath.filename() << "\r\n";
-        }
+  dataAcceptor_.async_accept([&dirContent, me = shared_from_this()](
+                                 std::error_code const& ec,
+                                 net::ip::tcp::socket peer) {
+    if (ec) {
+      me->sendFTPMsg(
+          FTPMsgs(FTPReplyCode::TRANSFER_ABORTED, "Data transfer aborted"));
+      return;
+    }
+    // TODO3: close acceptor after connect?
+    // Create a Unix-like file list
+    std::stringstream stream;
+    std::string owner = "hcmus", group = "hcmus";
+    for (auto const& entry : dirContent) {
+      // hcmus hcmus <size> <timestring> <filename>
+      auto const& filePath(entry.first);
+      stream << std::setw(10) << owner << " " << std::setw(10) << group << " ";
+      stream << std::setw(10) << fs::file_size(filePath) << " ";
+      stream << timeString(filePath) << " ";
+      stream << filePath.filename() << "\r\n";
+    }
 
-        // Copy the file list into a raw char vector
-        std::string dirListStr = stream.str();
-        std::shared_ptr<std::vector<char>> rawDirListData =
-            std::make_shared<std::vector<char>>();
-        rawDirListData->reserve(dirListStr.size());
-        std::copy(dirListStr.begin(), dirListStr.end(),
-                  std::back_inserter(*rawDirListData));
+    // Copy the file list into a raw char vector
+    std::string dirListStr = stream.str();
+    charbuf_ptr rawDirListData(
+        std::make_shared<std::vector<char>>(dirListStr.size()));
+    std::copy(dirListStr.begin(), dirListStr.end(),
+              std::back_inserter(rawDirListData));
 
-        // Send the string out
-        me->addDataToBufferAndSend(peer, rawDirListData);
-        me->addDataToBufferAndSend(
-            peer,
-            std::shared_ptr<std::vector<char>>());  // Nullpointer indicates
-                                                    // end of transmission
-      });
+    // Send the string out
+    me->addDataToBufferAndSend(peer, rawDirListData);
+    me->addDataToBufferAndSend(
+        peer, nullptr);  // Nullpointer indicates end of transmission
+  });
 }
 
 void FTPSession::sendNameList(
     std::map<fs::path, fs::file_status> const& dirContent) {
   dataAcceptor_.async_accept(
-      [&dirContent = std::as_const(dirContent), me = shared_from_this()](
-          std::error_code const& ec, net::ip::tcp::socket peer) {
+      [&dirContent, me = shared_from_this()](std::error_code const& ec,
+                                             net::ip::tcp::socket peer) {
         if (ec) {
           me->sendFTPMsg(
               FTPMsgs(FTPReplyCode::TRANSFER_ABORTED, "Data transfer aborted"));
@@ -384,19 +408,16 @@ void FTPSession::sendNameList(
         }
 
         // Copy the file list into a raw char vector
-        std::string dir_listing_string = stream.str();
-        std::shared_ptr<std::vector<char>> dir_listing_rawdata =
-            std::make_shared<std::vector<char>>();
-        dir_listing_rawdata->reserve(dir_listing_string.size());
-        std::copy(dir_listing_string.begin(), dir_listing_string.end(),
-                  std::back_inserter(*dir_listing_rawdata));
+        std::string dirListStr = stream.str();
+        charbuf_ptr rawDirListData(
+            std::make_shared<std::vector<char>>(dirListStr.size()));
+        std::copy(dirListStr.begin(), dirListStr.end(),
+                  std::back_inserter(*rawDirListData));
 
         // Send the string out
-        me->addDataToBufferAndSend(peer, dir_listing_rawdata);
+        me->addDataToBufferAndSend(peer, rawDirListData);
         me->addDataToBufferAndSend(
-            peer,
-            std::shared_ptr<std::vector<char>>());  // Nullpointer indicates end
-                                                    // of transmission
+            peer, nullptr);  // Nullpointer indicates end of transmission
       });
 }
 
@@ -424,6 +445,7 @@ FTPMsgs FTPSession::handleFTPCmdPASS(std::string const& param) {
   if (lastCmd_ == "USER") {
     if (auto user = userDb_.getUser(username_, param); user) {
       loggedUser_ = user;
+      // TODO1 thong bao login chac la cho nay
       return FTPMsgs(FTPReplyCode::USER_LOGGED_IN, "Login successfully");
     } else {
       return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Failed to log in");
@@ -507,6 +529,7 @@ FTPMsgs FTPSession::handleFTPCmdREIN(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdQUIT(std::string const& /*param*/) {
+  // TODO1 neu loggerUser khac null thi thong bao
   loggedUser_ = nullptr;
   return FTPMsgs(FTPReplyCode::SERVICE_CLOSING_CONTROL_CONNECTION,
                  "Connection shutting down");
@@ -522,8 +545,8 @@ FTPMsgs FTPSession::handleFTPCmdPASV(std::string const& /*param*/) {
   if (!loggedUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
-
   try {
+    // TODO1 open roi thi khong can mo lai
     if (dataAcceptor_.is_open()) {
       dataAcceptor_.close();
     }
@@ -889,10 +912,10 @@ FTPMsgs FTPSession::handleFTPCmdNOOP(std::string const& /*param*/) {
   return FTPMsgs(FTPReplyCode::COMMAND_OK, "OK");
 }
 
-void FTPSession::sendFile(std::shared_ptr<IoFile> file) {
+void FTPSession::sendFile(ioFile_ptr const& file) {
   dataAcceptor_.async_accept(
-      [file, me = shared_from_this()](std::error_code const& ec,
-                                      net::ip::tcp::socket peer) {
+      [&file, me = shared_from_this()](std::error_code const& ec,
+                                       net::ip::tcp::socket peer) {
         if (ec) {
           me->sendFTPMsg(
               FTPMsgs(FTPReplyCode::TRANSFER_ABORTED, "Data transfer aborted"));
@@ -906,16 +929,14 @@ void FTPSession::sendFile(std::shared_ptr<IoFile> file) {
 }
 
 void FTPSession::readFileDataAndSend(net::ip::tcp::socket& dataSocket,
-                                     std::shared_ptr<IoFile> file) {
-  net::post(fileRWStrand_, [me = shared_from_this(), &dataSocket, file]() {
-    if (file->fileStream_.eof()) return;
-
-    std::shared_ptr<std::vector<char>> buffer =
-        std::make_shared<std::vector<char>>(1 << 20);
-    file->fileStream_.read(buffer->data(),
-                           static_cast<std::streamsize>(buffer->size()));
-    auto bytes_read = file->fileStream_.gcount();
-    buffer->resize(static_cast<size_t>(bytes_read));
+                                     ioFile_ptr const& file) {
+  net::post(fileRWStrand_, [me = shared_from_this(), &dataSocket, &file]() {
+    if (file->fileStream_.eof()) {
+      return;
+    }
+    charbuf_ptr buffer(std::make_shared<std::vector<char>>(1 << 20));
+    file->fileStream_.read(buffer->data(), buffer->size());
+    buffer->resize(file->fileStream_.gcount());
 
     if (!file->fileStream_.eof()) {
       me->addDataToBufferAndSend(dataSocket, buffer, [me, &dataSocket, file]() {
@@ -923,17 +944,16 @@ void FTPSession::readFileDataAndSend(net::ip::tcp::socket& dataSocket,
       });
     } else {
       me->addDataToBufferAndSend(dataSocket, buffer);
-      me->addDataToBufferAndSend(dataSocket,
-                                 std::shared_ptr<std::vector<char>>(nullptr));
+      me->addDataToBufferAndSend(dataSocket, nullptr);
     }
   });
 }
 
 void FTPSession::addDataToBufferAndSend(net::ip::tcp::socket& dataSocket,
-                                        std::shared_ptr<std::vector<char>> data,
+                                        charbuf_ptr const& data,
                                         std::function<void(void)> fetchMore) {
   net::post(dataBufStrand_,
-            [me = shared_from_this(), &dataSocket, data, fetchMore]() {
+            [me = shared_from_this(), &dataSocket, &data, fetchMore]() {
               bool writeInProgress = !me->dataBuffer_.empty();
               me->dataBuffer_.push_back(data);
               if (!writeInProgress) {
@@ -946,13 +966,11 @@ void FTPSession::writeDataToSocket(net::ip::tcp::socket& dataSocket,
                                    std::function<void(void)> fetchMore) {
   net::post(dataBufStrand_, [me = shared_from_this(), &dataSocket,
                              fetchMore]() {
-    auto data = me->dataBuffer_.front();
-    if (data) {
-      // Send out the buffer
+    if (auto data = me->dataBuffer_.front(); data) {
       net::async_write(
           dataSocket, net::buffer(*data),
           net::bind_executor(
-              me->dataBufStrand_, [me, &dataSocket, data, fetchMore](
+              me->dataBufStrand_, [me, &dataSocket, &data, fetchMore](
                                       std::error_code const& ec,
                                       std::size_t /*bytes_to_transfer*/) {
                 me->dataBuffer_.pop_front();
@@ -974,10 +992,10 @@ void FTPSession::writeDataToSocket(net::ip::tcp::socket& dataSocket,
   });
 }
 
-void FTPSession::receiveFile(std::shared_ptr<IoFile> file) {
+void FTPSession::receiveFile(ioFile_ptr const& file) {
   dataAcceptor_.async_accept(
-      [file, me = shared_from_this()](std::error_code const& ec,
-                                      net::ip::tcp::socket peer) {
+      [me = shared_from_this(), &file](std::error_code const& ec,
+                                       net::ip::tcp::socket peer) {
         if (ec) {
           me->sendFTPMsg(
               FTPMsgs(FTPReplyCode::TRANSFER_ABORTED, "Data transfer aborted"));
@@ -988,13 +1006,11 @@ void FTPSession::receiveFile(std::shared_ptr<IoFile> file) {
 }
 
 void FTPSession::receiveDataFromSocketAndWriteToFile(
-    net::ip::tcp::socket& dataSocket, std::shared_ptr<IoFile> file) {
-  std::shared_ptr<std::vector<char>> buffer =
-      std::make_shared<std::vector<char>>(1 << 20);
-
+    net::ip::tcp::socket& dataSocket, ioFile_ptr const& file) {
+  charbuf_ptr buffer = std::make_shared<std::vector<char>>(1 << 20);
   net::async_read(
       dataSocket, net::buffer(*buffer), net::transfer_at_least(buffer->size()),
-      [me = shared_from_this(), &dataSocket, file, buffer](
+      [me = shared_from_this(), &dataSocket, &buffer, &file](
           std::error_code const& ec, std::size_t length) {
         buffer->resize(length);
         if (ec) {
@@ -1005,20 +1021,19 @@ void FTPSession::receiveDataFromSocketAndWriteToFile(
           }
           return;
         } else if (length > 0) {
-          me->writeDataToFile(buffer, file, [me, &dataSocket, file]() {
+          me->writeDataToFile(buffer, file, [me, &dataSocket, &file]() {
             me->receiveDataFromSocketAndWriteToFile(dataSocket, file);
           });
         }
       });
 }
 
-void FTPSession::writeDataToFile(std::shared_ptr<std::vector<char>> data,
-                                 std::shared_ptr<IoFile> file,
+void FTPSession::writeDataToFile(charbuf_ptr const& data,
+                                 ioFile_ptr const& file,
                                  std::function<void(void)> fetchMore) {
-  net::post(fileRWStrand_, [me = shared_from_this(), data, file, fetchMore] {
+  net::post(fileRWStrand_, [me = shared_from_this(), &data, &file, fetchMore] {
     fetchMore();
-    file->fileStream_.write(data->data(),
-                            static_cast<std::streamsize>(data->size()));
+    file->fileStream_.write(data->data(), data->size());
   });
 }
 
