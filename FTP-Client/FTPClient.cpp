@@ -5,6 +5,14 @@
 #include "FTPClient.hpp"
 
 static bool isNegative(FTPMsg const& msg) { return msg.first >= 400; }
+static std::list<std::shared_ptr<Dir_List>> receive_DirList(
+    std::string const& data);
+
+std::list<std::shared_ptr<Dir_List>> FTPClient::receive_DirList(
+    std::string const& data) {
+  std::stringstream s(data);
+  //dang viet
+}
 
 FTPClient::FTPClient() : msgSocket_(ioContext_), dataSocket_(ioContext_) {}
 

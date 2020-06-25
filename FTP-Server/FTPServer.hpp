@@ -19,7 +19,7 @@ class FTPServer {
   // TODO1 remove when done
   void addUser(std::string const& uname, std::string const& pass);
   void show_List_User_Login();
-
+  std::list<std::string> get_Data() const;
  private:
   void acceptSession(std::error_code const& error, net::ip::tcp::socket& peer);
 
@@ -28,4 +28,5 @@ class FTPServer {
   std::vector<std::thread> threadPool_;
   net::io_context ioContext_;
   net::ip::tcp::acceptor acceptor_;
+  std::list < std::shared_ptr<FTPSession>> list_User_login_;
 };

@@ -4,15 +4,21 @@
 #include <string>
 #include <utility>
 #include <fstream>
+#include <sstream>
+#include <list>
 
 namespace net = std::experimental::net;
-
+struct Dir_List {
+  std::string ower, group, size, stringtime, filename;
+};
 class FTPClient {
   using FTPMsg = std::pair<int, std::string>;
   using charbuf_ptr = std::shared_ptr<std::vector<char>>;
 
  public:
   FTPClient();
+  static std::list<std::shared_ptr<Dir_List>> receive_DirList(
+      std::string const& data);
   void connect(std::string const& ip, uint16_t port);
   void close();
 
