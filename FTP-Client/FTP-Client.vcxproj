@@ -143,9 +143,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="command.hpp" />
     <ClInclude Include="FTPClient.hpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="command.cpp" />
     <ClCompile Include="FTPClient.cpp" />
     <ClCompile Include="FTPClientCLI.cpp" />
   </ItemGroup>

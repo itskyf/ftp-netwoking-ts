@@ -3,7 +3,8 @@
 #include "FTPServer.hpp"
 #include "FTPSession.hpp"
 
-FTPServer::FTPServer() : acceptor_(ioContext_) {}
+FTPServer::FTPServer()
+    : acceptor_(ioContext_), dummy_(net::make_work_guard(ioContext_)) {}
 
 void FTPServer::start(unsigned int nbThreads, uint16_t port) {
   try {
@@ -22,7 +23,6 @@ void FTPServer::start(unsigned int nbThreads, uint16_t port) {
       [=](std::error_code const& error, net::ip::tcp::socket peer) {
         acceptSession(error, peer);
       });
-  auto dummy_(net::make_work_guard(ioContext_));
   for (unsigned int i = 0; i < nbThreads; ++i) {
     threadPool_.emplace_back([&]() { ioContext_.run(); });
   }
@@ -33,6 +33,7 @@ FTPServer::~FTPServer() { stop(); }
 
 void FTPServer::stop() {
   // TODO2 remove dummy work
+  dummy_.reset();
   ioContext_.stop();
   for (std::thread& thread : threadPool_) {
     thread.join();

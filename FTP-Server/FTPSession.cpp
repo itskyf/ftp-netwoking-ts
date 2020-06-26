@@ -82,7 +82,9 @@ FTPSession::~FTPSession() {
   std::cout << "FTP Session shutting down" << std::endl;
   // TODO1 ua co ham stop() khong vay
   sessionUser_ = nullptr;
-  if (thisClientUploading_) isUploading_ = false;
+  if (thisClientUploading_) {
+    isUploading_ = false;
+  }
   contactHandler_(shared_from_this(), false);
 }
 
@@ -124,6 +126,29 @@ void FTPSession::sendFTPMsg(FTPMsgs const& msg) {
   });
 }
 
+void FTPSession::readFTPCmd() {
+  cmdInputStr_.clear();
+  net::async_read_until(
+      cmdSocket_, net::dynamic_buffer(cmdInputStr_), "\r\n",
+      net::bind_executor(
+          msgWriteStrand_,
+          [me = shared_from_this()](std::error_code const& ec, size_t length) {
+            if (!ec) {
+              std::string packetStr(me->cmdInputStr_, 0,
+                                    length - 2);  // Remove \r\n
+              me->cmdInputStr_.clear();
+              std::cout << "FTP << " << packetStr << std::endl;
+              me->handleFTPCmd(packetStr);
+              return;
+            }
+            if (ec != net::error::eof) {
+              std::cerr << ec.message() << std::endl;
+            } else {
+              std::cout << "Control connection closed by client" << std::endl;
+            }
+          }));
+}
+
 void FTPSession::startSendingMsgs() {
   std::cout << "FTP >> " << msgOutputQueue_.front() << std::endl;
   net::async_write(
@@ -141,27 +166,6 @@ void FTPSession::startSendingMsgs() {
               std::cerr << "Message write error: " << ec.message() << std::endl;
             }
           }));
-}
-
-void FTPSession::readFTPCmd() {
-  net::async_read_until(
-      cmdSocket_, net::dynamic_buffer(cmdInputStr_), "\r\n",
-      [me = shared_from_this()](std::error_code const& ec, size_t length) {
-        if (!ec) {
-          std::string packetStr(me->cmdInputStr_, 0,
-                                length - 2);  // Remove \r\n
-          me->cmdInputStr_.clear();
-          std::cout << "FTP << " << packetStr << std::endl;
-          me->handleFTPCmd(packetStr);
-          return;
-        }
-        if (ec != net::error::eof) {
-          std::cerr << "async_read_until() error: " << ec.message()
-                    << std::endl;
-        } else {
-          std::cout << "Control connection closed by client" << std::endl;
-        }
-      });
 }
 
 void FTPSession::handleFTPCmd(std::string const& cmd) {
@@ -613,9 +617,9 @@ FTPMsgs FTPSession::handleFTPCmdPASV(std::string const& /*param*/) {
   // Split address and port into bytes and get the port the OS chose for us
   auto ipBytes = cmdSocket_.local_endpoint().address().to_v4().to_bytes();
   auto port = dataAcceptor_.local_endpoint().port();
-
   // Form reply string
-  std::stringstream stream("(");
+  std::stringstream stream;
+  stream << '(';
   for (int i = 0; i < 4; ++i) {
     stream << static_cast<int>(ipBytes[i]) << ",";
   }

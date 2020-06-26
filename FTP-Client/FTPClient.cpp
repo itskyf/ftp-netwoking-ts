@@ -3,23 +3,32 @@
 
 #include "FTPClient.hpp"
 
-struct Dir_Entry {
-  std::string ower, group, size, stringtime, filename;
-};
-
 static bool isNegative(FTPMsg const& msg) { return msg.first >= 400; }
 
-static std::list<Dir_Entry> string_to_dir_list(std::string const& data) {
+static std::list<dir_entry> string_to_dir_list(std::string const& data) {
   // <cai dong trong struct> \r\n
   // <another> \r\n
   std::stringstream s(data);
   std::string line;
-  std::list<Dir_Entry> list;
+  std::list<dir_entry> list;
+
   while (!s.eof()) {
     std::getline(s, line);
     if (line.back() == '\r') line.pop_back();
-    Dir_Entry mem;
-    s >> mem.ower >> mem.group >> mem.size >> mem.stringtime >> mem.filename;
+    if (line.empty()) continue;
+    std::stringstream lineStream(line);
+    std::string t1, t2, t3;
+    dir_entry mem;
+
+    lineStream >> t1;
+    mem.dir = t1.front() == 'd';
+    lineStream >> t1;  // delete 1
+    lineStream >> mem.ower >> mem.group >> mem.size;
+
+    lineStream >> t1 >> t2 >> t3;
+    mem.stringtime = t1 + t2 + t2;
+    lineStream >> mem.filename;
+
     list.push_back(mem);
   }
   return list;
@@ -27,12 +36,24 @@ static std::list<Dir_Entry> string_to_dir_list(std::string const& data) {
 
 FTPClient::FTPClient() : msgSocket_(ioContext_), dataSocket_(ioContext_) {}
 
-void FTPClient::connect(std::string const& ip, uint16_t port) {
+FTPClient::~FTPClient() {
+  close();
+  std::cout << "Client exited" << std::endl;
+}
+
+bool FTPClient::connect(std::string const& ip, uint16_t port) {
   net::ip::tcp::endpoint remote_endpoint(net::ip::make_address(ip), port);
   try {
     msgSocket_.connect(remote_endpoint);
+    FTPMsg reply = recvFTPMsg();
+    if (reply.first == 220) {
+      std::cout << "Connected to server" << std::endl;
+      return true;
+    }
+    return false;
   } catch (std::system_error const& er) {
     std::cerr << "Server connection error: " << er.what() << std::endl;
+    return false;
     throw er;
     // TODO1 retry
   }
@@ -40,8 +61,10 @@ void FTPClient::connect(std::string const& ip, uint16_t port) {
 
 void FTPClient::close() {
   try {
-    msgSocket_.shutdown(net::ip::tcp::socket::shutdown_both);
-    msgSocket_.close();
+    if (msgSocket_.is_open()) {
+      msgSocket_.shutdown(net::ip::tcp::socket::shutdown_both);
+      msgSocket_.close();
+    }
     // TODO1 data socket
   } catch (std::system_error const& er) {
     std::cerr << "Close error: " << er.what() << std::endl;
@@ -80,6 +103,7 @@ bool FTPClient::login(std::string const& uname, std::string const& pass) {
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }
 
@@ -88,21 +112,20 @@ FTPMsg FTPClient::recvFTPMsg() {
   std::string line;
   size_t len =
       net::read_until(msgSocket_, net::dynamic_buffer(line), "\r\n", ec);
-
   if (ec == net::error::eof) {
     /* Ignore eof. */
   } else if (ec) {
     std::cerr << "Receive message error: " << ec.message() << std::endl;
     throw ec;
   }
-
   int code = std::stoi(line.substr(0, 3));
-  std::string msg = line.substr(4, len - 2);
-  std::cout << "CLI << " << msg << std::endl;
+  std::string msg = std::string(line.begin() + 4, line.end() - 2);
+  std::cout << "CLI << " << code << ' ' << msg << std::endl;
   return std::make_pair(code, msg);
 }
 
 void FTPClient::sendCmd(std::string const& cmd) {
+  std::cout << "CLI >> " << cmd << std::endl;
   try {
     net::write(msgSocket_, net::buffer(cmd + "\r\n"));
   } catch (std::system_error const& er) {
@@ -119,7 +142,7 @@ bool FTPClient::upload(std::string const& local_file,
     return false;
   }
   try {
-    if (resetDataSocket()) {
+    if (!resetDataSocket()) {
       return false;
     }
     sendCmd("STOR " + remote_file);
@@ -141,10 +164,12 @@ bool FTPClient::upload(std::string const& local_file,
     /* Don't keep the data connection. */
     file.close();
     closeDataSocket();
+
     reply = recvFTPMsg();
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }
 
@@ -155,34 +180,38 @@ bool FTPClient::mkdir(std::string const& dirName) {
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }
 
-bool FTPClient::pwd() {
+std::pair<bool, std::string> FTPClient::pwd() {
   sendCmd("PWD");
   FTPMsg reply = recvFTPMsg();
-  // TODO1 print in here
-  return !isNegative(reply);
+  return std::make_pair(!isNegative(reply), reply.second);
 }
 
-bool FTPClient::ls(std::string const& remoteDir) {
+std::pair<bool, std::optional<std::list<dir_entry>>> FTPClient::ls(
+    std::string const& remoteDir) {
   try {
     if (!resetDataSocket()) {
-      return false;
+      return std::make_pair<bool, std::optional<std::list<dir_entry>>>(
+          false, std::nullopt);
     }
     sendCmd("LIST " + remoteDir);
     FTPMsg reply = recvFTPMsg();
     if (isNegative(reply)) {
-      return false;
+      return std::make_pair<bool, std::optional<std::list<dir_entry>>>(
+          false, std::nullopt);
     }
     std::string listDirStr = recvListDir();
-    std::list<Dir_Entry> listEntry = string_to_dir_list(listDirStr);
-    /* Don't keep the data connection. */
+    std::list<dir_entry> listEntry = string_to_dir_list(listDirStr);
     closeDataSocket();
     reply = recvFTPMsg();
-    return !isNegative(reply);
+    return std::make_pair<bool, std::optional<std::list<dir_entry>>>(
+        !isNegative(reply), listEntry);
   } catch (...) {
-    // TODOcatch
+    return std::make_pair<bool, std::optional<std::list<dir_entry>>>(
+        false, std::nullopt);
   }
 }
 
@@ -193,6 +222,7 @@ bool FTPClient::cd(std::string const& remoteDir) {
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }
 
@@ -204,7 +234,7 @@ bool FTPClient::download(std::string const& remote_file,
     return false;
   }
   try {
-    if (resetDataSocket()) {
+    if (!resetDataSocket()) {
       return false;
     }
     sendCmd("RETR " + remote_file);
@@ -229,6 +259,7 @@ bool FTPClient::download(std::string const& remote_file,
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }
 
@@ -260,7 +291,6 @@ bool FTPClient::resetDataSocket() {
   pos_1 = receivedMsg.find(")", pos_1 + 1, 1);
   uint8_t n2 = std::stoi(receivedMsg.substr(pos, pos_1 - pos));
   uint16_t port = (n1 << 8) | n2;
-
   try {
     closeDataSocket();
     net::ip::tcp::endpoint svDataEndpoint(net::ip::make_address(IP), port);
@@ -268,7 +298,9 @@ bool FTPClient::resetDataSocket() {
   } catch (std::system_error const& er) {
     std::cerr << "Open data socket error: " << er.what() << std::endl;
     dataSocket_.close();
+    return false;
   }
+  return true;
 }
 
 std::string FTPClient::recvListDir() {
@@ -321,6 +353,7 @@ bool FTPClient::rmdir(std::string const& directory_name) {
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }
 
@@ -332,5 +365,6 @@ bool FTPClient::rm(std::string const& remote_file) {
     return !isNegative(reply);
   } catch (...) {
     // TODOcatch
+    return false;
   }
 }

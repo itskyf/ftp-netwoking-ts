@@ -28,4 +28,5 @@ class FTPServer {
   std::vector<std::thread> threadPool_;
   net::io_context ioContext_;
   net::ip::tcp::acceptor acceptor_;
+  net::executor_work_guard<net::io_context::executor_type> dummy_;
 };
