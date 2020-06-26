@@ -5,7 +5,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
-#include <map>
+#include <set>
 #include <memory>
 
 #include "FTPMsgs.hpp"
@@ -20,9 +20,10 @@ using session_ptr = std::shared_ptr<FTPSession>;
 
 class FTPSession : public std::enable_shared_from_this<FTPSession> {
   using charbuf_ptr = std::shared_ptr<std::vector<char>>;
+  using socket_ptr = std::shared_ptr<net::ip::tcp::socket>;
 
  public:
-  FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
+  FTPSession(net::io_context& context, net::ip::tcp::socket& cmdSocket,
              UserDatabase& userDb,
              std::function<void(session_ptr, bool)> const& contactHandler);
   virtual ~FTPSession();
@@ -48,6 +49,7 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
 
   FTPMsgs handleFTPCmdUADD(std::string const& para);
   FTPMsgs handleFTPCmdUSER(std::string const& para);
+  FTPMsgs handleFTPCmdNOTI(std::string const& para);
   FTPMsgs handleFTPCmdPASS(std::string const& para);
   FTPMsgs handleFTPCmdACCT(std::string const& para);
   FTPMsgs handleFTPCmdCWD(std::string const& para);
@@ -65,6 +67,7 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
   // Ftp service commands
   FTPMsgs handleFTPCmdRETR(std::string const& para);
   FTPMsgs handleFTPCmdSTOR(std::string const& para);
+  FTPMsgs handleFTPCmdSIZE(std::string const& para);
   FTPMsgs handleFTPCmdSTOU(std::string const& para);
   FTPMsgs handleFTPCmdAPPE(std::string const& para);
   FTPMsgs handleFTPCmdALLO(std::string const& para);
@@ -85,26 +88,26 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
   FTPMsgs handleFTPCmdNOOP(std::string const& para);
 
   void sendFile(ioFile_ptr const& file);
-  void readFileDataAndSend(net::ip::tcp::socket& dataSocket,
+  void readFileDataAndSend(socket_ptr const& dataSocketPtr,
                            ioFile_ptr const& file);
   void addDataToBufferAndSend(
-      net::ip::tcp::socket& dataSocket, charbuf_ptr const& data,
+      socket_ptr const& dataSocketPtr, charbuf_ptr const& data,
       std::function<void(void)> fetchMore = []() { return; });
-  void writeDataToSocket(net::ip::tcp::socket& dataSocket,
+  void writeDataToSocket(socket_ptr const& dataSocketPtr,
                          std::function<void(void)> fetchMore);
 
   void receiveFile(ioFile_ptr const& file);
-  void receiveDataFromSocketAndWriteToFile(net::ip::tcp::socket& dataSocket,
+  void receiveDataFromSocketAndWriteToFile(socket_ptr const& dataSocketPtr,
                                            ioFile_ptr const& file);
   void writeDataToFile(
       charbuf_ptr const& data, ioFile_ptr const& file,
       std::function<void(void)> fetchMore = []() { return; });
 
   fs::path FTP2LocalPath(fs::path const& ftpPath) const;
-  std::string Local_to_FTP_Path(fs::path const& ftp_Path) const;
+  std::string Local2FTPPath(fs::path const& ftp_Path) const;
   FTPMsgs checkPathRenamable(fs::path const& ftpPath) const;
-  void sendDirListing(std::map<fs::path, fs::file_status> const& dirContent);
-  void sendNameList(std::map<fs::path, fs::file_status> const& dirContent);
+  void sendDirListing(std::set<fs::path> const& dirContent);
+  void sendNameList(std::set<fs::path> const& dirContent);
 
   void sendFTPMsg(FTPMsgs const& msg);
   void startSendingMsgs();
@@ -126,6 +129,7 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
   std::string cmdInputStr_;
   net::io_context& context_;
   net::ip::tcp::socket cmdSocket_;
+  net::ip::tcp::socket notiSocket_;
   net::strand<net::io_context::executor_type> msgWriteStrand_;
   std::deque<std::string> msgOutputQueue_;
 

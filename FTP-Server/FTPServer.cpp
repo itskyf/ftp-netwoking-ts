@@ -14,24 +14,25 @@ void FTPServer::start(unsigned int nbThreads, uint16_t port) {
     acceptor_.listen();
   } catch (std::system_error const& er) {
     std::cerr << er.what() << std::endl;
+    // TODO1 retry;
   }
-
   std::cout << "FTP Server created. Listening on port "
             << acceptor_.local_endpoint().port() << std::endl;
-
   acceptor_.async_accept(
       [=](std::error_code const& error, net::ip::tcp::socket peer) {
         acceptSession(error, peer);
       });
-
+  auto dummy_(net::make_work_guard(ioContext_));
   for (unsigned int i = 0; i < nbThreads; ++i) {
-    threadPool_.emplace_back([=] { ioContext_.run(); });
+    threadPool_.emplace_back([&]() { ioContext_.run(); });
   }
+  ioContext_.run();  // TODO with qt
 }
 
 FTPServer::~FTPServer() { stop(); }
 
 void FTPServer::stop() {
+  // TODO2 remove dummy work
   ioContext_.stop();
   for (std::thread& thread : threadPool_) {
     thread.join();
@@ -55,7 +56,6 @@ void FTPServer::acceptSession(std::error_code const& error,
   auto newSession = std::make_shared<FTPSession>(
       ioContext_, peer, userDb_,
       [this](session_ptr const& userPtr, bool login) {
-        assert(!msg.empty());
         if (login) {
           loggedUsers_.join(userPtr);
         } else {

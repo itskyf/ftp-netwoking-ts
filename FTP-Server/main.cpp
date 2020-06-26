@@ -18,9 +18,5 @@ int main() {
   // performance with multiple clients, but don't over-do it.
 
   // Prevent the application from exiting immediatelly
-  for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
   return 0;
 }
