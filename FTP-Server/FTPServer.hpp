@@ -3,30 +3,28 @@
 #include <experimental/io_context>
 
 #include <thread>
-#include <set>
 
 #include "FTPSession.hpp"
+#include "FTPLoggedUsers.hpp"
 #include "UserDatabase.hpp"
 
 namespace net = std::experimental::net;
 
 class FTPServer {
  public:
-  FTPServer(unsigned int nbThreads, uint16_t port);
+  FTPServer();
   virtual ~FTPServer();
+  void start(unsigned int nbThreads, uint16_t port);
   void stop();
-
   // TODO1 remove when done
   void addUser(std::string const& uname, std::string const& pass);
-  void show_List_User_Login();
-  std::list<std::string> get_Data() const;
+
  private:
   void acceptSession(std::error_code const& error, net::ip::tcp::socket& peer);
 
   UserDatabase userDb_;
-  std::set<session_ptr> logger_users_;
+  FTPLoggedUser loggedUsers_;
   std::vector<std::thread> threadPool_;
   net::io_context ioContext_;
   net::ip::tcp::acceptor acceptor_;
-  std::list < std::shared_ptr<FTPSession>> list_User_login_;
 };

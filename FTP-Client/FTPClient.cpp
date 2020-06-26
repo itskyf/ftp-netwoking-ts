@@ -1,17 +1,28 @@
 #include <experimental/buffer>
-
 #include <iostream>
 
 #include "FTPClient.hpp"
 
-static bool isNegative(FTPMsg const& msg) { return msg.first >= 400; }
-static std::list<std::shared_ptr<Dir_List>> receive_DirList(
-    std::string const& data);
+struct Dir_Entry {
+  std::string ower, group, size, stringtime, filename;
+};
 
-std::list<std::shared_ptr<Dir_List>> FTPClient::receive_DirList(
-    std::string const& data) {
+static bool isNegative(FTPMsg const& msg) { return msg.first >= 400; }
+
+static std::list<Dir_Entry> string_to_dir_list(std::string const& data) {
+  // <cai dong trong struct> \r\n
+  // <another> \r\n
   std::stringstream s(data);
-  //dang viet
+  std::string line;
+  std::list<Dir_Entry> list;
+  while (!s.eof()) {
+    std::getline(s, line);
+    if (line.back() == '\r') line.pop_back();
+    Dir_Entry mem;
+    s >> mem.ower >> mem.group >> mem.size >> mem.stringtime >> mem.filename;
+    list.push_back(mem);
+  }
+  return list;
 }
 
 FTPClient::FTPClient() : msgSocket_(ioContext_), dataSocket_(ioContext_) {}
@@ -42,38 +53,37 @@ void FTPClient::close() {
 bool FTPClient::signup(std::string const& uname, std::string const& pass) {
   try {
     sendCmd("UADD " + uname);
-    FTPMsg reply = readFTPMsg();
+    FTPMsg reply = recvFTPMsg();
     if (reply.first == 331) {
       sendCmd("PASS " + pass);
-      reply = readFTPMsg();
+      reply = recvFTPMsg();
     } else if (reply.first == 332) {
       // TONOTDO we don't support ACCT command
     }
-
-    return (isNegative(reply));
+    return !isNegative(reply);
   } catch (...) {
-    // TODO something
+    // TODOcatch
   }
 }
 
 bool FTPClient::login(std::string const& uname, std::string const& pass) {
   try {
     sendCmd("USER " + uname);
-    FTPMsg reply = readFTPMsg();
+    FTPMsg reply = recvFTPMsg();
     if (reply.first == 331) {
       sendCmd("PASS " + pass);
-      reply = readFTPMsg();
+      reply = recvFTPMsg();
     } else if (reply.first == 332) {
       // TONOTDO we don't support ACCT command
     }
 
-    return (isNegative(reply));
+    return !isNegative(reply);
   } catch (...) {
-    // TODO something
+    // TODOcatch
   }
 }
 
-FTPMsg FTPClient::readFTPMsg() {
+FTPMsg FTPClient::recvFTPMsg() {
   std::error_code ec;
   std::string line;
   size_t len =
@@ -101,8 +111,8 @@ void FTPClient::sendCmd(std::string const& cmd) {
   }
 }
 
-bool FTPClient::upload(const std::string& local_file,
-                       const std::string& remote_file) {
+bool FTPClient::upload(std::string const& local_file,
+                       std::string const& remote_file) {
   std::ifstream file(local_file, std::ios_base::binary);
   if (!file.is_open()) {
     std::cerr << "Cannot open local file " << std::endl;
@@ -113,40 +123,46 @@ bool FTPClient::upload(const std::string& local_file,
       return false;
     }
     sendCmd("STOR " + remote_file);
-    FTPMsg reply = readFTPMsg();
+    FTPMsg reply = recvFTPMsg();
     if (isNegative(reply)) {
       return false;
     }
     /* Start file transfer. */
     charbuf_ptr buffer(std::make_shared<std::vector<char>>(1 << 20));
     while (!file.eof()) {
-      file.read(buffer.data(), buffer.size());
-      buffer.resize(static_cast<size_t>(file.gcount()));
+      file.read(buffer->data(), buffer->size());
+      buffer->resize(file.gcount());
       if (file.fail() && !file.eof()) {
         std::cerr << "Read local file error" << std::endl;
         return false;
       }
-
-      data_connection->send(buffer.data(), file.gcount());
-
-      if (file.eof()) break;
+      sendData(buffer);
     }
-
     /* Don't keep the data connection. */
+    file.close();
     closeDataSocket();
-    reply = readFTPMsg();
-    return isNegative(reply);
-  } catch (const connection_exception& ex) {
-    handle_connection_exception(ex);
-    return command_result::error;
+    reply = recvFTPMsg();
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
+  }
+}
+
+bool FTPClient::mkdir(std::string const& dirName) {
+  try {
+    sendCmd("MKD " + dirName);
+    FTPMsg reply = recvFTPMsg();
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
   }
 }
 
 bool FTPClient::pwd() {
   sendCmd("PWD");
-  FTPMsg reply = readFTPMsg();
+  FTPMsg reply = recvFTPMsg();
   // TODO1 print in here
-  return isNegative(reply);
+  return !isNegative(reply);
 }
 
 bool FTPClient::ls(std::string const& remoteDir) {
@@ -155,93 +171,78 @@ bool FTPClient::ls(std::string const& remoteDir) {
       return false;
     }
     sendCmd("LIST " + remoteDir);
-    FTPMsg reply = readFTPMsg();
+    FTPMsg reply = recvFTPMsg();
     if (isNegative(reply)) {
       return false;
     }
-    std::string listDirEntry = dataRecv();
-    // TODO1 map folder entry Minh Nguyet lam
-
+    std::string listDirStr = recvListDir();
+    std::list<Dir_Entry> listEntry = string_to_dir_list(listDirStr);
     /* Don't keep the data connection. */
     closeDataSocket();
-    reply = readFTPMsg();
-    return isNegative(reply);
-  } catch (const connection_exception& ex) {
-    handle_connection_exception(ex);
-    return command_result::error;
+    reply = recvFTPMsg();
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
   }
 }
 
-bool FTPClient::download(const std::string& remote_file,
-                         const std::string& local_file) {
-  std::ofstream file(local_file, std::ios_base::binary);
+bool FTPClient::cd(std::string const& remoteDir) {
+  try {
+    sendCmd("CWD " + remoteDir);
+    FTPMsg reply = recvFTPMsg();
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
+  }
+}
 
+bool FTPClient::download(std::string const& remote_file,
+                         std::string const& local_file) {
+  std::ofstream file(local_file, std::ios_base::binary);
   if (!file.is_open()) {
     std::cerr << "Cannot open local file " << std::endl;
     return false;
   }
-
   try {
-    auto [result, data_connection] = create_data_connection();
-
-    if (result != command_result::ok) {
-      return result;
+    if (resetDataSocket()) {
+      return false;
     }
-
     sendCmd("RETR " + remote_file);
-
-    FTPMsg reply = readFTPMsg();
-
-    report_reply(reply);
-
+    FTPMsg reply = recvFTPMsg();
     if (isNegative(reply)) {
-      return command_result::not_ok;
+      return false;
     }
 
     /* Start file transfer. */
-    for (;;) {
-      size_t size = data_connection->recv(buffer_.data(), buffer_.size());
-
-      if (size == 0) break;
-
-      file.write(buffer_.data(), size);
-
+    charbuf_ptr bufPtr = std::make_shared<std::vector<char>>(1 << 20);
+    while (size_t size = recvData(bufPtr)) {
+      file.write(bufPtr->data(), size);
       if (file.fail()) {
-        report_error("Cannot write data to file.");
-        return command_result::error;
+        std::cerr << "Write local file error" << std::endl;
+        return false;
       }
     }
-
     /* Don't keep the data connection. */
-    data_connection->close();
-
-    reply = readFTPMsg();
-
-    report_reply(reply);
-
-    if (isNegative(reply)) {
-      return command_result::not_ok;
-    } else {
-      return command_result::ok;
-    }
-  } catch (const connection_exception& ex) {
-    handle_connection_exception(ex);
-    return command_result::error;
+    file.close();
+    closeDataSocket();
+    reply = recvFTPMsg();
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
   }
 }
 
 bool FTPClient::resetDataSocket() {
   // gui pasv goi port
   sendCmd("PASV");
-  FTPMsg reply = readFTPMsg();
+  FTPMsg reply = recvFTPMsg();
   if (isNegative(reply)) {
     std::cerr << "Reset data socket error" << std::endl;
     return false;
   }
   // day la IP
   std::string& receivedMsg(reply.second);
-  size_t pos = receivedMsg.find("(") + 1;
-  size_t pos_1 = receivedMsg.find(",");
+  size_t pos = receivedMsg.find("(") + 1, pos_1 = receivedMsg.find(",");
   std::string IP = receivedMsg.substr(pos, pos_1 - pos);
 
   for (int i = 0; i < 3; ++i) {
@@ -262,15 +263,15 @@ bool FTPClient::resetDataSocket() {
 
   try {
     closeDataSocket();
-    net::ip::tcp::endpoint remoteDataEndpoint(net::ip::make_address(ip), port);
-    dataSocket_.connect(remoteDataEndpoint);
+    net::ip::tcp::endpoint svDataEndpoint(net::ip::make_address(IP), port);
+    dataSocket_.connect(svDataEndpoint);
   } catch (std::system_error const& er) {
     std::cerr << "Open data socket error: " << er.what() << std::endl;
     dataSocket_.close();
   }
 }
 
-std::string FTPClient::dataRecv() {
+std::string FTPClient::recvListDir() {
   std::string reply;
   std::error_code ec;
   net::read(dataSocket_, net::dynamic_buffer(reply), ec);
@@ -278,16 +279,58 @@ std::string FTPClient::dataRecv() {
   if (ec == net::error::eof) {
     /* Ignore eof. */
   } else if (ec) {
-    std::cerr << "Data receive error: " << ec.message() << std::endl;
+    std::cerr << "Receive directories error: " << ec.message() << std::endl;
     throw ec;
   }
-
   return reply;
+}
+
+size_t FTPClient::recvData(charbuf_ptr const& bufPtr) {
+  std::error_code ec;
+  size_t size = dataSocket_.read_some(net::buffer(*bufPtr, bufPtr->size()), ec);
+
+  if (ec == net::error::eof) {
+    /* Ignore eof. */
+  } else if (ec) {
+    std::cerr << "Receive file data err: " << ec.message() << std::endl;
+  }
+  return size;
+}
+
+void FTPClient::sendData(charbuf_ptr const& data) {
+  std::error_code ec;
+  net::write(dataSocket_, net::buffer(*data), ec);
+  if (ec) {
+    std::cerr << "Send data aborted: " << ec.message() << std::endl;
+    throw ec;
+  }
 }
 
 void FTPClient::closeDataSocket() {
   if (dataSocket_.is_open()) {
     dataSocket_.shutdown(net::ip::tcp::socket::shutdown_both);
     dataSocket_.close();
+  }
+}
+
+bool FTPClient::rmdir(std::string const& directory_name) {
+  try {
+    sendCmd("RMD " + directory_name);
+    FTPMsg reply = recvFTPMsg();
+
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
+  }
+}
+
+bool FTPClient::rm(std::string const& remote_file) {
+  try {
+    sendCmd("RMD " + remote_file);
+    FTPMsg reply = recvFTPMsg();
+
+    return !isNegative(reply);
+  } catch (...) {
+    // TODOcatch
   }
 }

@@ -3,11 +3,11 @@
 #include "FTPServer.hpp"
 #include "FTPSession.hpp"
 
-FTPServer::FTPServer(unsigned int nbThreads, uint16_t port)
-    : acceptor_(ioContext_) {
-  net::ip::tcp::endpoint endpoint(net::ip::tcp::v4(), port);
+FTPServer::FTPServer() : acceptor_(ioContext_) {}
 
+void FTPServer::start(unsigned int nbThreads, uint16_t port) {
   try {
+    net::ip::tcp::endpoint endpoint(net::ip::tcp::v4(), port);
     acceptor_.open(endpoint.protocol());
     acceptor_.set_option(net::ip::tcp::acceptor::reuse_address(true));
     acceptor_.bind(endpoint);
@@ -52,25 +52,19 @@ void FTPServer::acceptSession(std::error_code const& error,
   std::cout << "FTP Client connected: "
             << peer.remote_endpoint().address().to_string() << ":"
             << peer.remote_endpoint().port() << std::endl;
-  auto newSession = std::make_shared<FTPSession>(ioContext_, peer, userDb_);
+  auto newSession = std::make_shared<FTPSession>(
+      ioContext_, peer, userDb_,
+      [this](session_ptr const& userPtr, bool login) {
+        assert(!msg.empty());
+        if (login) {
+          loggedUsers_.join(userPtr);
+        } else {
+          loggedUsers_.leave(userPtr);
+        }
+      });
   newSession->start();
   acceptor_.async_accept(
       [=](std::error_code const& error, net::ip::tcp::socket peer_) {
         acceptSession(error, peer_);
       });
-}
-
-void FTPServer::show_List_User_Login() {
-  // TODO1 add new khi da log in thanh cong, mutex list nay
-
-  for (auto const& session : list_User_login_) {
-      std::cout << session << std::setw(10) <<session->getUserName();
-  }
-}
-std::list<std::string> FTPServer::get_Data() const {
-  std::list<std::string> User;
-  for (auto const& session : list_User_login_) {
-    User.push_back(session->getUserName());
-  }
-  return User;
 }

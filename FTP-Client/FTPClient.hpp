@@ -8,17 +8,13 @@
 #include <list>
 
 namespace net = std::experimental::net;
-struct Dir_List {
-  std::string ower, group, size, stringtime, filename;
-};
+using FTPMsg = std::pair<int, std::string>;
+
 class FTPClient {
-  using FTPMsg = std::pair<int, std::string>;
   using charbuf_ptr = std::shared_ptr<std::vector<char>>;
 
  public:
   FTPClient();
-  static std::list<std::shared_ptr<Dir_List>> receive_DirList(
-      std::string const& data);
   void connect(std::string const& ip, uint16_t port);
   void close();
 
@@ -26,14 +22,19 @@ class FTPClient {
   bool login(std::string const& uname, std::string const& pass);
   bool upload(std::string const& local_file, std::string const& remote_file);
   bool download(std::string const& remote_file, std::string const& local_file);
+  bool mkdir(std::string const& dirName);
   bool pwd();
   bool ls(std::string const& remoteDir);
   bool cd(std::string const& remoteDir);
+  bool rmdir(std::string const& directory_name);
+  bool rm(std::string const& remote_file);
 
  private:
-  FTPMsg readFTPMsg();
+  FTPMsg recvFTPMsg();
   void sendCmd(std::string const& cmd);
-  std::string dataRecv();
+  std::string recvListDir();
+  void sendData(charbuf_ptr const& data);
+  size_t recvData(charbuf_ptr const& bufPtr);
 
   void closeDataSocket();
   bool resetDataSocket();

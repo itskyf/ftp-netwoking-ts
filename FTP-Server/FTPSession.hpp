@@ -1,12 +1,12 @@
 #pragma once
 #include <experimental/net>
 
+#include <atomic>
+#include <deque>
 #include <filesystem>
 #include <fstream>
-#include <deque>
 #include <map>
 #include <memory>
-#include <set>
 
 #include "FTPMsgs.hpp"
 #include "FTPUser.hpp"
@@ -23,11 +23,12 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
 
  public:
   FTPSession(net::io_context& context, net::ip::tcp::socket& socket,
-             UserDatabase& userDb, std::set<session_ptr>& logged_users,
-             std::function<void(std::string)> const& completionHandler);
+             UserDatabase& userDb,
+             std::function<void(session_ptr, bool)> const& contactHandler);
   virtual ~FTPSession();
   std::string getUserName() const;
   void start();
+  void deliver(std::string const& msg);
 
  private:
   struct IoFile {
@@ -110,23 +111,25 @@ class FTPSession : public std::enable_shared_from_this<FTPSession> {
   void readFTPCmd();
   void handleFTPCmd(std::string const& cmd);
 
-  std::function<void(std::string)> const completionHandler_;
+  std::function<void(session_ptr, bool)> const contactHandler_;
 
   UserDatabase& userDb_;
-  std::shared_ptr<FTPUser> loggedUser_;
+  static std::atomic<bool> isUploading_;
+  bool thisClientUploading_;
+
+  fs::path ftpWorkingDir_;
   std::string lastCmd_;
   std::string username_;
   std::string renameSrcPath_;
-  fs::path ftpWorkingDir_;
+  std::shared_ptr<FTPUser> sessionUser_;
 
+  std::string cmdInputStr_;
   net::io_context& context_;
   net::ip::tcp::socket cmdSocket_;
   net::strand<net::io_context::executor_type> msgWriteStrand_;
-  std::string cmdInputStr_;
   std::deque<std::string> msgOutputQueue_;
 
   bool dataTypeBinary_;
-  std::set<session_ptr>& logged_users_;
   net::ip::tcp::acceptor dataAcceptor_;
   std::deque<charbuf_ptr> dataBuffer_;
   net::strand<net::io_context::executor_type> fileRWStrand_;

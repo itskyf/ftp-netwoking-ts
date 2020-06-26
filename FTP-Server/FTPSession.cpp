@@ -53,7 +53,6 @@ static std::string timeString(fs::path const& path) {
 #endif
 
   int current_year = now_timeinfo.tm_year, file_year = file_timeinfo.tm_year;
-  // Use strftime for the day and year / time
 
   std::stringstream ss;
   ss << (file_year == current_year ? std::put_time(&file_timeinfo, "%b %e %R")
@@ -64,23 +63,28 @@ static std::string timeString(fs::path const& path) {
 
 FTPSession::FTPSession(
     net::io_context& context, net::ip::tcp::socket& socket,
-    UserDatabase& userDb, std::set<session_ptr>& logged_users,
-    std::function<void(std::string)> const& completionHandler)
+    UserDatabase& userDb,
+    std::function<void(session_ptr, bool)> const& contactHandler)
     : userDb_(userDb),
-      logged_users_(logged_users),
       context_(context),
       cmdSocket_(std::move(socket)),
+      thisClientUploading_(false),
       dataTypeBinary_(true),
       msgWriteStrand_(context_.get_executor()),
       fileRWStrand_(context_.get_executor()),
       dataBufStrand_(context_.get_executor()),
       dataAcceptor_(context_),
-      completionHandler_(completionHandler) {}
+      contactHandler_(contactHandler) {}
 
 FTPSession::~FTPSession() {
   std::cout << "FTP Session shutting down" << std::endl;
-  // TODO2 completion_handler?
+  // TODO1 ua co ham stop() khong vay
+  sessionUser_ = nullptr;
+  if (thisClientUploading_) isUploading_ = false;
+  contactHandler_(shared_from_this(), false);
 }
+
+std::atomic<bool> FTPSession::isUploading_(false);
 
 std::string FTPSession::getUserName() const { return username_; }
 
@@ -94,6 +98,10 @@ void FTPSession::start() {
   sendFTPMsg(FTPMsgs(FTPReplyCode::SERVICE_READY_FOR_NEW_USER,
                      "Welcome to fineFTP Server"));
   readFTPCmd();
+}
+
+void FTPSession::deliver(std::string const& msg) {
+  sendFTPMsg(FTPMsgs(FTPReplyCode::USER_NOTIFICATION, msg));
 }
 
 void FTPSession::sendFTPMsg(FTPMsgs const& msg) {
@@ -301,7 +309,7 @@ void FTPSession::handleFTPCmd(std::string const& cmd) {
                        "Unrecognized command"));
   }
   if (lastCmd_ == "QUIT") {
-    // Close command socket
+    // TODO1 check atomic
     net::bind_executor(msgWriteStrand_,
                        [me = shared_from_this()]() { me->cmdSocket_.close(); });
   } else {
@@ -311,29 +319,29 @@ void FTPSession::handleFTPCmd(std::string const& cmd) {
 }
 
 fs::path FTPSession::FTP2LocalPath(fs::path const& ftpPath) const {
-  assert(loggedUser_);
+  assert(sessionUser_);
   // TODO1 if path is /.., limit ..
   fs::path path = ftpPath.is_absolute()
-                      ? loggedUser_->localRootPath_ / ftpPath.relative_path()
+                      ? sessionUser_->localRootPath_ / ftpPath.relative_path()
                       : ftpWorkingDir_ / ftpPath;
   path = fs::weakly_canonical(path);
-  return path < loggedUser_->localRootPath_ ? loggedUser_->localRootPath_
-                                            : path;
+  return path < sessionUser_->localRootPath_ ? sessionUser_->localRootPath_
+                                             : path;
 }
 
 std::string FTPSession::Local_to_FTP_Path(fs::path const& ftp_Path) const {
   // ftp_Path:     C:\\mn              | /home/mn
   // logged->root: C:\\mn\\abc\\xyz    | /home/mn/abc/xyz
   // return         /abc/xyz
-  assert(loggedUser_);  // Entering passive mode (192,168,122,24,195,110)
+  assert(sessionUser_);  // Entering passive mode (192,168,122,24,195,110)
   std::string ftp_path = ftp_Path.generic_string();
-  std::string root_path = loggedUser_->localRootPath_.generic_string();
+  std::string root_path = sessionUser_->localRootPath_.generic_string();
   return root_path.substr(root_path.find(ftp_path) + ftp_path.length());
 }
 
 FTPMsgs FTPSession::checkPathRenamable(fs::path const& ftpPath) const {
   // TODO1 check it
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   if (ftpPath.empty()) {
@@ -381,7 +389,7 @@ void FTPSession::sendDirListing(
     charbuf_ptr rawDirListData(
         std::make_shared<std::vector<char>>(dirListStr.size()));
     std::copy(dirListStr.begin(), dirListStr.end(),
-              std::back_inserter(rawDirListData));
+              std::back_inserter(*rawDirListData));
 
     // Send the string out
     me->addDataToBufferAndSend(peer, rawDirListData);
@@ -424,7 +432,7 @@ void FTPSession::sendNameList(
 // FTP Commands
 // Access control commands
 FTPMsgs FTPSession::handleFTPCmdUADD(std::string const& param) {
-  loggedUser_ = nullptr;
+  sessionUser_ = nullptr;
   username_ = param;
   return param.empty()
              ? FTPMsgs(FTPReplyCode::SYNTAX_ERROR_PARAMETERS,
@@ -433,7 +441,7 @@ FTPMsgs FTPSession::handleFTPCmdUADD(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdUSER(std::string const& param) {
-  loggedUser_ = nullptr;
+  sessionUser_ = nullptr;
   username_ = param;
   return param.empty()
              ? FTPMsgs(FTPReplyCode::SYNTAX_ERROR_PARAMETERS,
@@ -444,7 +452,8 @@ FTPMsgs FTPSession::handleFTPCmdUSER(std::string const& param) {
 FTPMsgs FTPSession::handleFTPCmdPASS(std::string const& param) {
   if (lastCmd_ == "USER") {
     if (auto user = userDb_.getUser(username_, param); user) {
-      loggedUser_ = user;
+      sessionUser_ = user;
+      contactHandler_(shared_from_this(), true);
       // TODO1 thong bao login chac la cho nay
       return FTPMsgs(FTPReplyCode::USER_LOGGED_IN, "Login successfully");
     } else {
@@ -454,7 +463,8 @@ FTPMsgs FTPSession::handleFTPCmdPASS(std::string const& param) {
     // TODO1 choose root dir
     if (auto user = userDb_.addUser(username_, param, fs::current_path());
         user) {
-      loggedUser_ = user;
+      sessionUser_ = user;
+      contactHandler_(shared_from_this(), true);
       return FTPMsgs(FTPReplyCode::USER_LOGGED_IN, "Sign up successfully");
     } else {
       return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Username already existed");
@@ -471,7 +481,7 @@ FTPMsgs FTPSession::handleFTPCmdACCT(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdCWD(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   if (param.empty()) {
@@ -508,10 +518,10 @@ FTPMsgs FTPSession::handleFTPCmdCWD(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdCDUP(std::string const& /*param*/) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
-  if (ftpWorkingDir_ != loggedUser_->localRootPath_) {
+  if (ftpWorkingDir_ != sessionUser_->localRootPath_) {
     // Only CDUP when we are not already at the root directory
     FTPMsgs cwdReply = handleFTPCmdCWD("..");
     // The CWD returns FILE_ACTION_COMPLETED on success, while CDUP returns
@@ -530,7 +540,9 @@ FTPMsgs FTPSession::handleFTPCmdREIN(std::string const& /*param*/) {
 
 FTPMsgs FTPSession::handleFTPCmdQUIT(std::string const& /*param*/) {
   // TODO1 neu loggerUser khac null thi thong bao
-  loggedUser_ = nullptr;
+  sessionUser_ = nullptr;
+  contactHandler_(shared_from_this(), false);
+  if (thisClientUploading_) isUploading_ = false;
   return FTPMsgs(FTPReplyCode::SERVICE_CLOSING_CONTROL_CONNECTION,
                  "Connection shutting down");
 }
@@ -542,7 +554,7 @@ FTPMsgs FTPSession::handleFTPCmdPORT(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdPASV(std::string const& /*param*/) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   try {
@@ -574,7 +586,7 @@ FTPMsgs FTPSession::handleFTPCmdPASV(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdTYPE(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   if (param == "A") {
@@ -604,7 +616,7 @@ FTPMsgs FTPSession::handleFTPCmdMODE(std::string const& /*param*/) {
 
 // Ftp service commands
 FTPMsgs FTPSession::handleFTPCmdRETR(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
 
@@ -616,7 +628,7 @@ FTPMsgs FTPSession::handleFTPCmdRETR(std::string const& param) {
   fs::path localPath = FTP2LocalPath(param);
   std::ios::openmode openMode =
       (dataTypeBinary_ ? (std::ios::in | std::ios::binary) : (std::ios::in));
-  std::shared_ptr<IoFile> file = std::make_shared<IoFile>(localPath, openMode);
+  ioFile_ptr file(std::make_shared<IoFile>(localPath, openMode));
   if (!file->fileStream_.good()) {
     return FTPMsgs(FTPReplyCode::ACTION_ABORTED_LOCAL_ERROR,
                    "Error opening file for transfer");
@@ -627,7 +639,7 @@ FTPMsgs FTPSession::handleFTPCmdRETR(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdSTOR(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   // TODO3: the ACTION_NOT_TAKEN reply is not RCF 959 conform. Apparently in
@@ -638,7 +650,6 @@ FTPMsgs FTPSession::handleFTPCmdSTOR(std::string const& param) {
     return FTPMsgs(FTPReplyCode::ERROR_OPENING_DATA_CONNECTION,
                    "Error opening data connection");
   }
-
   fs::path localPath = FTP2LocalPath(param);
   try {
     if (fs::is_directory(localPath)) {
@@ -653,12 +664,21 @@ FTPMsgs FTPSession::handleFTPCmdSTOR(std::string const& param) {
 
   std::ios::openmode openMode =
       (dataTypeBinary_ ? (std::ios::out | std::ios::binary) : (std::ios::out));
-  std::shared_ptr<IoFile> file = std::make_shared<IoFile>(localPath, openMode);
+  ioFile_ptr file(std::make_shared<IoFile>(localPath, openMode));
   if (!file->fileStream_.good()) {
     return FTPMsgs(FTPReplyCode::ACTION_ABORTED_LOCAL_ERROR,
                    "Error opening file for transfer");
   }
+  if (isUploading_) {
+    return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN_FILENAME_NOT_ALLOWED,
+                   "Another client is uploading.");
+  }
+  isUploading_ = true;
+  thisClientUploading_ = true;
   receiveFile(file);
+  thisClientUploading_ = false;
+  isUploading_ = false;
+
   return FTPMsgs(FTPReplyCode::FILE_STATUS_OK_OPENING_DATA_CONNECTION,
                  "Receiving file");
 }
@@ -669,7 +689,7 @@ FTPMsgs FTPSession::handleFTPCmdSTOU(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdAPPE(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   if (!dataAcceptor_.is_open()) {
@@ -689,7 +709,7 @@ FTPMsgs FTPSession::handleFTPCmdAPPE(std::string const& param) {
   std::ios::openmode openMode =
       (dataTypeBinary_ ? (std::ios::out | std::ios::app | std::ios::binary)
                        : (std::ios::out | std::ios::app));
-  std::shared_ptr<IoFile> file = std::make_shared<IoFile>(localPath, openMode);
+  ioFile_ptr file(std::make_shared<IoFile>(localPath, openMode));
 
   if (!file->fileStream_.good()) {
     return FTPMsgs(FTPReplyCode::ACTION_ABORTED_LOCAL_ERROR,
@@ -722,7 +742,7 @@ FTPMsgs FTPSession::handleFTPCmdRNFR(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdRNTO(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   if (lastCmd_ != "RNFR" || renameSrcPath_.empty()) {
@@ -768,7 +788,7 @@ FTPMsgs FTPSession::handleFTPCmdABOR(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdDELE(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
 
@@ -786,7 +806,7 @@ FTPMsgs FTPSession::handleFTPCmdDELE(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdRMD(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   fs::path localPath = FTP2LocalPath(param);
@@ -798,7 +818,7 @@ FTPMsgs FTPSession::handleFTPCmdRMD(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdMKD(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
   fs::path localPath = FTP2LocalPath(param);
@@ -812,7 +832,7 @@ FTPMsgs FTPSession::handleFTPCmdMKD(std::string const& param) {
 FTPMsgs FTPSession::handleFTPCmdPWD(std::string const& /*param*/) {
   // RFC 959 does not allow returning NOT_LOGGED_IN here, so we abuse
   // ACTION_NOT_TAKEN for that.
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::ACTION_NOT_TAKEN, "Not logged in");
   }
   // TODO1 bo root trong cai duoi
@@ -820,7 +840,7 @@ FTPMsgs FTPSession::handleFTPCmdPWD(std::string const& /*param*/) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdLIST(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
 
@@ -847,7 +867,7 @@ FTPMsgs FTPSession::handleFTPCmdLIST(std::string const& param) {
 }
 
 FTPMsgs FTPSession::handleFTPCmdNLST(std::string const& param) {
-  if (!loggedUser_) {
+  if (!sessionUser_) {
     return FTPMsgs(FTPReplyCode::NOT_LOGGED_IN, "Not logged in");
   }
 

@@ -7,9 +7,9 @@
 int main() {
   // Create an FTP Server on port 2121. We use 2121 instead of the default port
   // 21, as your application would need root privileges to open port 21.
-  FTPServer server(4, 2121);
+  FTPServer server;
   server.addUser("test", "123");
-
+  server.start(4, 2121);
   // Add the well known anonymous user and some normal users. The anonymous user
   // can log in with username "anonyous" or "ftp" and any password. The normal
   // users have to provide their username and password.

@@ -143,6 +143,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="FTPLoggedUsers.hpp" />
     <ClInclude Include="FTPMsgs.hpp" />
     <ClInclude Include="FTPServer.hpp" />
     <ClInclude Include="FTPSession.hpp" />
